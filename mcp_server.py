@@ -32,6 +32,14 @@ TOOLS = [
                 "wake": {"type": "boolean",
                          "description": "Also run every registered peer's wake command now, "
                                         "whether or not the peer is polling (cooldown still applies)."},
+                "kind": {"type": "string", "enum": list(bus.SEND_KINDS),
+                         "description": "What the message is (default 'message')."},
+                "for": {"type": "string",
+                        "description": "Address it to one participant; their notify hook "
+                                       "(e.g. a person's Telegram forwarder) fires."},
+                "refs": {"type": "array", "items": {"type": "string"},
+                         "description": "Files to pin by content hash: 'path' or 'path@sha256'. "
+                                        "Use absolute paths. bus_verify_refs reports drift later."},
             },
             "required": ["body"],
         },
@@ -52,6 +60,10 @@ TOOLS = [
                 "include_own": {"type": "boolean", "description": "Also return your own messages."},
                 "after": {"type": "integer",
                           "description": "Read from this seq instead of your cursor (implies peek; 0 = everything)."},
+                "kind": {"type": "array", "items": {"type": "string", "enum": list(bus.KINDS)},
+                         "description": "Only these kinds. A filtered read never moves your cursor."},
+                "force": {"type": "boolean",
+                          "description": "Read even while another watch holds your lock (takes it over)."},
             },
         },
     },
@@ -68,14 +80,21 @@ TOOLS = [
                 "channel": {"type": "string"},
                 "keep_wake": {"type": "boolean",
                               "description": "Leave your wake registration in place (default: done clears it)."},
+                "phase": {"type": "string",
+                          "description": "Record a verdict for this phase only; the channel stays open."},
             },
             "required": ["verdict", "summary"],
         },
     },
     {
         "name": "bus_status",
-        "description": "Channel status: participants, message counts, per-agent verdicts, complete flag.",
-        "inputSchema": {"type": "object", "properties": {"channel": {"type": "string"}}},
+        "description": "Channel status: participants, liveness (heartbeat age, live watch, silent, "
+                       "spawned process alive), per-agent and per-phase verdicts, complete flag.",
+        "inputSchema": {"type": "object", "properties": {
+            "channel": {"type": "string"},
+            "silent_after_min": {"type": "number",
+                                 "description": "Minutes without a poll, send, or watch before a "
+                                                "participant counts as silent (default 10)."}}},
     },
     {
         "name": "bus_channels",
@@ -115,6 +134,16 @@ TOOLS = [
             "required": ["agent"],
         },
     },
+    {
+        "name": "bus_verify_refs",
+        "description": "For a message sent with refs, report each pinned file as unchanged, "
+                       "changed, or missing since it was sent.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"seq": {"type": "integer"}, "channel": {"type": "string"}},
+            "required": ["seq"],
+        },
+    },
 ]
 
 
@@ -136,24 +165,33 @@ def call_tool(name: str, arguments: dict):
     root = bus.resolve_root()
     if name == "bus_send":
         agent, harness = _identity()
+        kind = arguments.get("kind") or "message"
+        if kind not in bus.SEND_KINDS:  # done and phase go through bus_done
+            raise bus.BusError(f"kind must be one of {bus.SEND_KINDS}")
         return bus.send(root, _channel(arguments), agent, harness, arguments.get("body", ""),
-                        wake=bool(arguments.get("wake", False)))
+                        kind=kind, wake=bool(arguments.get("wake", False)),
+                        for_agent=arguments.get("for") or None, refs=arguments.get("refs") or None)
     if name == "bus_recv":
         agent, _ = _identity()
         after = arguments.get("after")
+        kinds = arguments.get("kind")
         return bus.recv(root, _channel(arguments), agent,
                         wait=bool(arguments.get("wait", False)),
                         timeout=float(arguments.get("timeout_s", DEFAULT_TIMEOUT)),
                         peek=bool(arguments.get("peek", False)),
                         include_own=bool(arguments.get("include_own", False)),
-                        after=None if after is None else int(after))
+                        after=None if after is None else int(after),
+                        kinds=[kinds] if isinstance(kinds, str) else kinds,
+                        force=bool(arguments.get("force", False)))
     if name == "bus_done":
         agent, harness = _identity()
         return bus.post_done(root, _channel(arguments), agent, harness,
                              arguments.get("verdict", ""), arguments.get("summary", ""),
-                             keep_wake=bool(arguments.get("keep_wake", False)))
+                             keep_wake=bool(arguments.get("keep_wake", False)),
+                             phase=arguments.get("phase"))
     if name == "bus_status":
-        return bus.status(root, _channel(arguments))
+        return bus.status(root, _channel(arguments),
+                          silent_after=float(arguments.get("silent_after_min", 10)) * 60)
     if name == "bus_channels":
         return bus.list_channels(root)
     if name == "bus_register_wake":
@@ -166,6 +204,8 @@ def call_tool(name: str, arguments: dict):
                                  allow_secret_like=bool(arguments.get("allow_secret_like", False)))
     if name == "bus_wake":
         return bus.wake_agent(root, _channel(arguments), arguments.get("agent", ""), source="bus_wake")
+    if name == "bus_verify_refs":
+        return bus.verify_refs(root, _channel(arguments), int(arguments.get("seq", 0)))
     raise bus.BusError(f"unknown tool {name!r}")
 
 

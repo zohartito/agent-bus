@@ -1,6 +1,43 @@
-# Try the bus — two terminals, two pastes
+# Try the bus
 
-Use a throwaway root so this cannot collide with `~/.agent-bus`.
+Two ways: **spawn** (one terminal: you direct, a Codex peer runs detached) or **two pastes** (two harness sessions you drive by hand). Both use a throwaway root so nothing collides with `~/.agent-bus`.
+
+## 1. Spawn — you plus a detached Codex peer
+
+```bash
+mkdir -p /tmp/agent-bus-try/director && cd /tmp/agent-bus-try/director
+printf 'agent = "claude"\nharness = "claude-code"\nchannel = "try-2"\nroot = "/tmp/agent-bus-try"\n' > .agent-bus.toml
+BUS="python3 $HOME/projects/agent-bus/bus.py"
+```
+
+Save the peer's standing instruction in that folder as `peer-prompt.md`:
+
+```text
+You are agent codex on agent-bus channel try-2. Your identity is already in your env, so every
+bus call is just: python3 ~/projects/agent-bus/bus.py <verb>. Talk to the peer only through the bus.
+Loop: 1) run `... watch --timeout 60 --body-only`; if it prints nothing, run it again (up to 10 times).
+2) Do what the message asks with your own tools. 3) Reply with `... send --kind answer --body "..."`,
+ending by handing the turn back. Go to 1. When the peer proposes finishing and you agree, run
+`... done --verdict PASS --summary "one line"` and stop. No secrets on the bus; under 150 words a message.
+```
+
+Then:
+
+```bash
+$BUS send --kind plan --body "Round 1: reply HASH=<first 8 hex of sha256 of the UTF-8 string 'agent-bus v0', no trailing newline>, then ask me one short verification question. Your move, codex."
+$BUS spawn --agent codex -- codex exec -m gpt-6-astra -c 'model_reasoning_effort="high"' \
+    --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$(cat peer-prompt.md)"
+$BUS watch --body-only     # expect HASH=bb4aa524 and a question
+$BUS status                # codex: watching true (between turns), spawn_alive true
+$BUS send --body "Correct. <answer its question>. Let's finish: post done PASS."
+$BUS watch --body-only     # expect DONE PASS
+$BUS done --verdict PASS --summary "spawned peer, two round trips, hash matched"
+$BUS status                # complete: true, verdict: PASS
+```
+
+`spawn` printed the session id it captured and the resume command it registered as codex's wake. If codex's `exec` turn ends before you are done, `$BUS wake codex` resumes it (or leave `$BUS watch-wake` running). What it did is in `/tmp/agent-bus-try/try-2/spawn/codex.log`. A `status` showing codex `silent` with `spawn_alive: false` means it died, not that it is busy.
+
+## 2. Two pastes — two sessions you drive
 
 ```bash
 mkdir -p /tmp/agent-bus-try
@@ -13,7 +50,7 @@ Do not paste both into the same session.
 
 ---
 
-## Agent B — waiter (paste this whole block)
+### Agent B — waiter (paste this whole block)
 
 You are agent `cursor` on harness `cursor-agent`. You share a local mailbox with peer `claude`. Communicate ONLY by running the bus CLI. Never edit files for the peer. Never type into another window.
 
@@ -36,7 +73,7 @@ You start by waiting. Do not send first.
 
 ---
 
-## Agent A — starter (paste this whole block, after B is waiting)
+### Agent A — starter (paste this whole block, after B is waiting)
 
 You are agent `claude` on harness `claude-code`. You share a local mailbox with peer `cursor`. Communicate ONLY by running the bus CLI. Never edit files for the peer. Never type into another window.
 
@@ -63,7 +100,7 @@ When both are done, run `… status -c try-1` and show me VERDICT.json.
 
 ---
 
-## Watch from a third shell (optional)
+### Watch from a third shell (optional)
 
 ```bash
 AGENT_BUS_DIR=/tmp/agent-bus-try python3 ~/projects/agent-bus/bus.py recv -c try-1 --after 0 --include-own -a observer
