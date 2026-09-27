@@ -2,6 +2,8 @@
 
 import json
 import os
+import shlex
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -502,6 +504,28 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("crew.py desk",
                       (installed / "Contents" / "MacOS" / "Crew").read_text(encoding="utf-8"))
         self.assertTrue((dest / "Crew.command").is_file())
+
+    def test_launchers_find_the_repo_in_place_and_when_installed(self):
+        dest = Path(tempfile.mkdtemp())
+        installed = crew.install_shortcut(dest)
+        fakebin = Path(tempfile.mkdtemp())
+        (fakebin / "open").write_text('#!/bin/sh\necho "$@"\n')
+        (fakebin / "open").chmod(0o755)
+        env = dict(os.environ, PATH=f"{fakebin}:{os.environ['PATH']}")
+        for exe in (REPO / "Crew.app" / "Contents" / "MacOS" / "Crew",
+                    installed / "Contents" / "MacOS" / "Crew"):
+            out = subprocess.run([str(exe)], env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(out.stdout, f"-a Terminal {REPO}/Open Crew.command\n", out.stderr)
+        pinned = f"REPO={shlex.quote(str(REPO))}\n"
+        self.assertIn(pinned, (dest / "Crew.command").read_text(encoding="utf-8"))
+        self.assertTrue(os.access(dest / "Crew.command", os.X_OK))
+
+    def test_shortcut_skips_the_quarantine_step_without_xattr(self):
+        dest = Path(tempfile.mkdtemp())
+        with mock.patch.object(crew.shutil, "which", return_value=None), \
+                mock.patch.object(crew.subprocess, "run") as run:
+            self.assertEqual(crew.install_shortcut(dest), dest / "Crew.app")
+        run.assert_not_called()
 
 
 class StatusWrapTests(CrewCase):

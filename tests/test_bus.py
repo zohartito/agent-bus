@@ -297,6 +297,15 @@ class WakeTests(BusCase):
         self.assertFalse(sent["woken"][0]["woke"])
         self.assertIn("cooldown", sent["woken"][0]["reason"])
 
+    def test_an_explicit_wake_works_on_an_empty_channel_once(self):
+        bus.register_wake(self.root, "ch", "beta", "beta-harness", self.cmd)
+        first = bus.wake_agent(self.root, "ch", "beta", cooldown=0, wait=True)
+        self.assertEqual((first["seq"], first["woke"], first["exit_code"]), (0, True, 0))
+        self.assertEqual(self.woke_lines(), ["woke beta ch"])
+        again = bus.wake_agent(self.root, "ch", "beta", cooldown=0)
+        self.assertFalse(again["woke"])
+        self.assertIn("already woke for seq 0", again["reason"])
+
     def test_concurrent_wakes_launch_once_per_seq(self):
         bus.register_wake(self.root, "ch", "beta", "beta-harness", self.cmd)
         self.send("alpha", "one")
@@ -799,6 +808,23 @@ class SpawnTests(BusCase):
         self.assertNotIn("wake_cleared", third)
         self.assertEqual(bus.get_wake(self.root, "ch", "codex")["command"], "echo mine")
         self.stop(third["pid"])
+
+    def test_an_exited_peer_is_dead_even_before_anyone_reaps_it(self):
+        codex = self.fake("codex", 'echo "session id: 0199bbbb-0000-0000-0000-000000000000" >&2\n'
+                                   'sleep 1\n')
+        rec = bus.spawn(self.root, "ch", "codex", None, [str(codex), "exec", "x"],
+                        cwd=str(self.root), id_timeout=5)
+        self.assertTrue(rec["started"])
+        self.assertTrue(wait_until(
+            lambda: not bus.status(self.root, "ch")["readers"][0]["spawn_alive"]))
+        again = bus.spawn(self.root, "ch", "codex", None, [str(codex), "exec", "x"],
+                          cwd=str(self.root), id_timeout=5)  # not "already running"
+        self.stop(again["pid"])
+
+    def test_a_reused_pid_is_not_the_spawned_peer(self):
+        me = {"pid": os.getpid(), "started": bus._proc_started(os.getpid())}
+        self.assertTrue(bus._spawn_alive(me))
+        self.assertFalse(bus._spawn_alive(dict(me, started="Thu Jan  1 00:00:00 1970")))
 
     def test_a_spawn_in_progress_refuses_a_second(self):
         (self.root / "ch" / "spawn").mkdir(parents=True)

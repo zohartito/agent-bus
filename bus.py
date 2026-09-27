@@ -529,7 +529,7 @@ def _liveness(ch: Path, agent: str, last_ts: str | None, silent_after: float) ->
     spawned = _read_json(ch / "spawn" / f"{agent}.json")
     if spawned:
         out["spawn_pid"] = spawned.get("pid")
-        out["spawn_alive"] = _pid_alive(int(spawned.get("pid") or 0))
+        out["spawn_alive"] = _spawn_alive(spawned)
     return out
 
 
@@ -718,7 +718,8 @@ def _launch_wake(root: Path, channel: str, agent: str, seq: int, force: bool,
             result["reason"] = "no wake registration"
             return result, None
         now = time.time()
-        if seq <= int(reg.get("last_wake_seq", 0)):
+        # A registration that never woke has no seq to repeat, even seq 0 on an empty channel.
+        if float(reg.get("last_wake_epoch", 0.0)) and seq <= int(reg.get("last_wake_seq", 0)):
             result["reason"] = f"already woke for seq {reg['last_wake_seq']}"
             return result, None
         since = now - float(reg.get("last_wake_epoch", 0.0))
@@ -836,6 +837,8 @@ def sweep_wakes(root: Path, cooldown: float = DEFAULT_COOLDOWN, idle: float = DE
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False  # os.kill(0, 0) would probe our own process group
+    for proc in _DETACHED:
+        proc.poll()  # reap our own exited children: a zombie still answers kill(pid, 0)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -943,6 +946,24 @@ def _notify(root: Path, ch: Path, record: dict) -> dict:
 # <channel>/spawn/<agent>.log    stdout+stderr of the spawned harness
 
 
+def _proc_started(pid: int) -> str | None:
+    """The process's start time as ps reports it: with the pid, it names one process."""
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None
+
+
+def _spawn_alive(record: dict) -> bool:
+    """The spawned process is still running, and its pid was not reused since."""
+    pid = int(record.get("pid") or 0)
+    if not _pid_alive(pid):
+        return False
+    return not record.get("started") or _proc_started(pid) == record["started"]
+
+
 def _harness_kind(name: str) -> str | None:
     base = Path(name).name.lower()
     return next((kind for kind in RESUME_FLAGS if base.startswith(kind)), None)
@@ -1023,7 +1044,7 @@ def _spawn_locked(root: Path, ch: Path, channel: str, agent: str, harness: str,
                   allow_secret_like: bool) -> dict:
     spawn_dir = ch / "spawn"
     previous = _read_json(spawn_dir / f"{agent}.json")
-    if previous and _pid_alive(int(previous.get("pid") or 0)):
+    if previous and _spawn_alive(previous):
         raise BusError(f"{agent!r} is already running on {channel!r} (pid {previous['pid']}); "
                        "stop it before spawning another")
     workdir = Path(cwd or os.getcwd()).expanduser().resolve()
@@ -1049,11 +1070,12 @@ def _spawn_locked(root: Path, ch: Path, channel: str, agent: str, harness: str,
     except OSError as err:
         raise BusError(f"could not start {argv[0]!r}: {err}") from err
     _detach(proc)
+    started = _proc_started(proc.pid)  # now, while the pid is surely still ours
     if kind == "codex":
         session_id = _await_session_id(log, offset, proc, id_timeout)
     record = {"agent": agent, "harness": harness, "pid": proc.pid, "argv": argv,
               "cwd": str(workdir), "log": str(log), "session_id": session_id,
-              "started_ts": _now_iso(), "wake_command": None}
+              "started_ts": _now_iso(), "started": started, "wake_command": None}
     extra = {}
     if not register:
         extra["wake_reason"] = "--no-wake"

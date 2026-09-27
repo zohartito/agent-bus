@@ -1001,6 +1001,17 @@ def _seat_states(cfg: Crew) -> dict[str, str]:
     return states
 
 
+def _pin_repo(launcher: Path) -> None:
+    """A launcher copied out of the repo cannot find it from its own location."""
+    lines = launcher.read_text(encoding="utf-8").splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.startswith("REPO="):
+            lines[i] = f"REPO={shlex.quote(str(REPO))}\n"
+            launcher.write_text("".join(lines), encoding="utf-8")
+            return
+    raise CrewError(f"{launcher} has no REPO= line to point at {REPO}")
+
+
 def install_shortcut(dest_dir: Path | str) -> Path:
     src = REPO / "Crew.app"
     if not (src / "Contents" / "MacOS" / "Crew").is_file():
@@ -1011,11 +1022,14 @@ def install_shortcut(dest_dir: Path | str) -> Path:
     if dest.exists():
         shutil.rmtree(dest)
     shutil.copytree(src, dest)
+    _pin_repo(dest / "Contents" / "MacOS" / "Crew")
     cmd = dest_dir / "Crew.command"
     shutil.copy2(REPO / "Open Crew.command", cmd)
+    _pin_repo(cmd)
     cmd.chmod(0o755)
-    subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(dest), str(cmd)],
-                   capture_output=True)
+    if shutil.which("xattr"):  # macOS only: clear the quarantine flag so a double-click runs
+        subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(dest), str(cmd)],
+                       capture_output=True)
     return dest
 
 
