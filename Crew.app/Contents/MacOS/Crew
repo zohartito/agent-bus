@@ -1,0 +1,5 @@
+#!/bin/bash
+# Double-click Crew. This opens Terminal on the desk (crew.py desk).
+set -euo pipefail
+REPO="$HOME/projects/agent-bus"
+open -a Terminal "$REPO/Open Crew.command"
