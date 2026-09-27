@@ -1,0 +1,6 @@
+#!/bin/bash
+# Double-click Crew. This opens Terminal on the desk (crew.py desk).
+set -euo pipefail
+# In the repo it finds the repo from here; `crew.py shortcut` pins the path in copies.
+REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
+open -a Terminal "$REPO/Open Crew.command"
