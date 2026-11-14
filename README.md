@@ -6,6 +6,8 @@ This is Zohar's (`github.com/zohartito/agent-bus`). It is not BridgeMind.
 
 v0 is a local file mailbox: one directory per channel under `~/.agent-bus`, one JSON file per message, monotonic gapless ids claimed with an atomic hard link. Stdlib Python only — no dependencies, no daemon, no hosted service. The product surface is a CLI (`bus.py`) and a stdio MCP server (`mcp_server.py`) over the same core. The original build spec is [`GOAL.md`](GOAL.md).
 
+Install: clone this repository. It needs only Python 3 (standard library), so there is nothing else to install. Run `python3 bus.py` from the checkout as shown below; replace `/path/to/agent-bus` in the examples with your checkout's path.
+
 ## Quick start: you direct, `spawn` starts the peer
 
 One `.agent-bus.toml` in your working directory (or any parent) is your identity; no env prefixes:
@@ -69,7 +71,7 @@ python3 bus.py join -c demo --clear                     # unregister without don
 A **Claude Code** session registers its own wake from its Bash tool, which sees `CLAUDE_CODE_SESSION_ID`. The double quotes expand the id and `$PWD` at registration time. Add the permission flags the session already runs with, or the headless resume cannot run `bus.py`:
 
 ```bash
-python3 ~/projects/agent-bus/bus.py join -c case-r14 --wake \
+python3 /path/to/agent-bus/bus.py join -c case-r14 --wake \
   "cd $PWD && claude --resume $CLAUDE_CODE_SESSION_ID --dangerously-skip-permissions -p 'read agent-bus channel case-r14 and continue'"
 ```
 
@@ -96,7 +98,7 @@ A person is a participant with `--harness human` (e.g. `--as zohar --harness hum
 
 ```bash
 python3 bus.py join -c case-r14 --as zohar --harness human \
-  --notify "python3 ~/projects/agent-bus/examples/notify-telegram.py"
+  --notify "python3 /path/to/agent-bus/examples/notify-telegram.py"
 ```
 
 An agent asks with `send --kind question --for zohar --body "Fillet 2 or 3 mm?"`. Any message `--for zohar` runs the hook detached, with `AGENT_BUS_MSG_SEQ/ID/FROM/KIND/BODY` and `AGENT_BUS_AGENT=zohar` in its env; launches go to `notify/log.jsonl`, output to `notify/zohar.out`. [`examples/notify-telegram.py`](examples/notify-telegram.py) forwards it to Telegram (credentials from `~/.config/printer-telegram/telegram.env`, never on the bus; `--dry-run` prints instead) and ends with the exact command that posts the answer back as a normal message: `bus.py send --as zohar --harness human --kind answer --body "3 mm"`. Hook commands pass the same checks as wake commands (secret tripwire, never taken from a message body). `join --clear` drops both hooks.
@@ -110,7 +112,7 @@ Claude Code:
 ```bash
 claude mcp add agent-bus --scope user \
   -e AGENT_BUS_AGENT=claude -e AGENT_BUS_HARNESS=claude-code \
-  -- python3 /Users/zohartito/projects/agent-bus/mcp_server.py
+  -- python3 /path/to/agent-bus/mcp_server.py
 ```
 
 Codex (`~/.codex/config.toml`):
@@ -118,7 +120,7 @@ Codex (`~/.codex/config.toml`):
 ```toml
 [mcp_servers.agent-bus]
 command = "python3"
-args = ["/Users/zohartito/projects/agent-bus/mcp_server.py"]
+args = ["/path/to/agent-bus/mcp_server.py"]
 env = { AGENT_BUS_AGENT = "codex", AGENT_BUS_HARNESS = "codex-cli" }
 ```
 
@@ -127,7 +129,7 @@ cursor-agent (`~/.cursor/mcp.json`) and Gemini CLI (`~/.gemini/settings.json`), 
 ```json
 {"mcpServers": {"agent-bus": {
   "command": "python3",
-  "args": ["/Users/zohartito/projects/agent-bus/mcp_server.py"],
+  "args": ["/path/to/agent-bus/mcp_server.py"],
   "env": {"AGENT_BUS_AGENT": "cursor", "AGENT_BUS_HARNESS": "cursor-agent"}}}}
 ```
 
