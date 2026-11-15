@@ -93,6 +93,23 @@ class TurnCapTests(unittest.TestCase):
         with self.assertRaisesRegex(bus.BusError, "closed"):
             bus.configure_channel(self.root, "ch", 20, agent="operator", harness="human")
 
+    def test_lowering_cap_onto_completed_channel_withdraws_completion_receipt(self):
+        self.config(10)
+        self.send("a")
+        self.send("b")
+        bus.post_done(self.root, "ch", "a", "codex", "PASS", "done")
+        bus.post_done(self.root, "ch", "b", "codex", "PASS", "done")
+        verdict_path = self.root / "ch" / "VERDICT.json"
+        self.assertTrue(verdict_path.is_file())
+        used = bus.status(self.root, "ch")["turns_used"]
+        bus.configure_channel(self.root, "ch", used, agent="operator", harness="human")
+        status = bus.status(self.root, "ch")
+        self.assertTrue(status["capped"])
+        self.assertFalse(status["complete"])
+        self.assertFalse(verdict_path.exists())
+        listed = {c["channel"]: c for c in bus.list_channels(self.root)}["ch"]
+        self.assertFalse(listed["complete"])
+
     def test_named_moderator_closes_before_cap_and_cannot_overwrite(self):
         self.config()
         result = bus.close_channel(self.root, "ch", "moderator", "claude", "PASS", "reviewed")

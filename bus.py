@@ -329,7 +329,13 @@ def configure_channel(root: Path, channel: str, max_turns: int | None = None,
         if moderator is not None:
             cfg["moderator"] = moderator
         _write_json(ch, ch / "config.json", cfg)
-        _record_cap(ch, _turn_state(ch, cfg=cfg))
+        state = _turn_state(ch, cfg=cfg)
+        _record_cap(ch, state)
+        # Lowering the cap onto a channel the peers already signed off reopens the
+        # question: a capped channel needs a moderator decision, so the earlier
+        # completion receipt no longer holds (send() applies the same rule).
+        if state["capped"]:
+            (ch / "VERDICT.json").unlink(missing_ok=True)
         return cfg
 
 
