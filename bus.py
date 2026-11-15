@@ -51,6 +51,7 @@ VERDICTS = ("PASS", "FAIL")
 SEND_KINDS = ("message", "plan", "question", "answer", "checkpoint", "review", "blocker")
 KINDS = SEND_KINDS + ("done", "phase")
 HUMAN_HARNESS = "human"   # a person: consulted, never blocks VERDICT.json; a FAIL still counts
+DEFAULT_MAX_TURNS = 230   # measured baseline: 2 * 112 counted turns, rounded up to 10
 DEFAULT_COOLDOWN = 120.0  # seconds between two wakes of the same agent on one channel
 DEFAULT_IDLE = 60.0       # no recv/watch heartbeat for this long means "not polling"
 DEFAULT_SILENT = 600.0    # no poll, send, or live watch for this long: status says "silent"
@@ -91,6 +92,10 @@ class BusError(Exception):
     """Refused or failed bus operation; the message is safe to show the agent."""
 
 
+class TurnCapError(BusError):
+    """The channel needs a moderator before further messages can be sent."""
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -105,7 +110,7 @@ def _age_of(ts: str | None) -> float | None:
 
 
 def resolve_root(root: str | None = None) -> Path:
-    raw = root or os.environ.get("AGENT_BUS_DIR") or DEFAULT_ROOT
+    raw = root or os.environ.get("AGENT_BUS_DIR") or os.environ.get("AGENT_BUS_ROOT") or DEFAULT_ROOT
     # Absolute, so a wake or spawn that runs `cd <cwd> && ...` still finds it.
     return Path(raw).expanduser().absolute()
 
@@ -220,6 +225,157 @@ def secret_like(text: str) -> str | None:
     return None
 
 
+# --- channel limits and moderation ------------------------------------------
+
+
+@contextmanager
+def _channel_lock(ch: Path):
+    """Serialize budget checks, message claims, closure and config changes."""
+    path = ch / ".verdict.lock"
+    if fcntl is not None:
+        with _flock(path):
+            yield
+    else:  # Windows needs a real lock here, unlike the optional reader locks.
+        import msvcrt
+        with path.open("a+b") as fh:
+            if not fh.seek(0, os.SEEK_END):
+                fh.write(b"\0")
+                fh.flush()
+            fh.seek(0)
+            try:
+                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+            except OSError as err:
+                raise BusError("channel busy; retry the operation") from err
+            try:
+                yield
+            finally:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def _positive_int(value, label: str) -> int:
+    if isinstance(value, bool) or not re.fullmatch(r"[0-9]+", str(value)) or int(value) < 1:
+        raise BusError(f"{label} must be a positive integer")
+    return int(value)
+
+
+def _moderator_name(name: str) -> str:
+    if secret_like(name):
+        raise BusError("moderator looks like it contains a secret")
+    return _valid_name("moderator", name)
+
+
+def channel_config(ch: Path) -> dict:
+    """Read only; a stored budget beats the environment, including for old channels."""
+    path = ch / "config.json"
+    if path.exists():
+        cfg = _read_json(path)
+        if not isinstance(cfg, dict) or set(cfg) != {"max_turns", "moderator"}:
+            raise BusError("invalid channel config.json")
+        cap = _positive_int(cfg["max_turns"], "max_turns")
+        moderator = cfg["moderator"]
+        if moderator is not None:
+            if not isinstance(moderator, str):
+                raise BusError("invalid moderator in channel config.json")
+            _moderator_name(moderator)
+        return {"max_turns": cap, "moderator": moderator}
+    return {"max_turns": _positive_int(os.environ.get("AGENT_BUS_MAX_TURNS", DEFAULT_MAX_TURNS),
+                                       "AGENT_BUS_MAX_TURNS"), "moderator": None}
+
+
+def _turn_state(ch: Path, msgs: list[dict] | None = None, cfg: dict | None = None) -> dict:
+    cfg = channel_config(ch) if cfg is None else cfg
+    msgs = _read_after(ch, 0) if msgs is None else msgs
+    used = sum(m["kind"] in SEND_KINDS and m["harness"] != HUMAN_HARNESS for m in msgs)
+    return {"turns_used": used, "cap": cfg["max_turns"], "capped": used >= cfg["max_turns"]}
+
+
+def _record_cap(ch: Path, state: dict) -> None:
+    # Called with the channel lock held. Retained after a raise as a one-time receipt.
+    if state["capped"] and not (ch / "CAPPED.json").exists():
+        _write_json(ch, ch / "CAPPED.json", dict(state, channel=ch.name, ts=_now_iso()))
+
+
+def _closed(ch: Path) -> dict | None:
+    record = _read_json(ch / "VERDICT.json")
+    return record if record and record.get("closed_by") else None
+
+
+def _require_moderator(cfg: dict, agent: str | None, harness: str | None) -> None:
+    if not agent or not harness or not (harness == HUMAN_HARNESS or agent == cfg["moderator"]):
+        raise BusError("only a human or the configured moderator may change or close this channel")
+    _valid_name("agent", agent)
+    _valid_name("harness", harness)
+
+
+def configure_channel(root: Path, channel: str, max_turns: int | None = None,
+                      moderator: str | None = None, agent: str | None = None,
+                      harness: str | None = None) -> dict:
+    if max_turns is not None:
+        max_turns = _positive_int(max_turns, "max_turns")
+    if moderator is not None:
+        moderator = _moderator_name(moderator)
+    ch = _channel_dir(root, channel, create=True)
+    with _channel_lock(ch):
+        cfg = channel_config(ch)
+        if (ch / "config.json").exists() or _existing_seqs(ch / "messages"):
+            if max_turns is None and moderator is None:
+                return cfg
+            _require_moderator(cfg, agent, harness)
+        if _closed(ch):
+            raise BusError(f"channel {channel} is closed")
+        if max_turns is not None:
+            cfg["max_turns"] = max_turns
+        if moderator is not None:
+            cfg["moderator"] = moderator
+        _write_json(ch, ch / "config.json", cfg)
+        state = _turn_state(ch, cfg=cfg)
+        _record_cap(ch, state)
+        # Lowering the cap onto a channel the peers already signed off reopens the
+        # question: a capped channel needs a moderator decision, so the earlier
+        # completion receipt no longer holds (send() applies the same rule).
+        if state["capped"]:
+            (ch / "VERDICT.json").unlink(missing_ok=True)
+        return cfg
+
+
+def raise_cap(root: Path, channel: str, agent: str, harness: str, by: int) -> dict:
+    by = _positive_int(by, "by")
+    ch = _channel_dir(root, channel)
+    with _channel_lock(ch):
+        cfg = channel_config(ch)
+        _require_moderator(cfg, agent, harness)
+        if _closed(ch):
+            raise BusError(f"channel {channel} is closed")
+        cfg["max_turns"] += by
+        _write_json(ch, ch / "config.json", cfg)
+        return dict(cfg, **_turn_state(ch, cfg=cfg))
+
+
+def close_channel(root: Path, channel: str, agent: str, harness: str,
+                  verdict: str, summary: str) -> dict:
+    verdict = (verdict or "").upper()
+    if verdict not in VERDICTS:
+        raise BusError(f"verdict must be one of {VERDICTS}")
+    if not summary or not summary.strip():
+        raise BusError("summary is required")
+    if secret_like(summary):
+        raise BusError("summary looks like it contains a secret")
+    ch = _channel_dir(root, channel)
+    with _channel_lock(ch):
+        cfg = channel_config(ch)
+        _require_moderator(cfg, agent, harness)
+        if _closed(ch):
+            raise BusError(f"channel {channel} is closed")
+        state = _turn_state(ch, cfg=cfg)
+        _record_cap(ch, state)
+        record = dict(state, channel=channel, complete=True, verdict=verdict,
+                      summary=summary, closed_by=agent, harness=harness,
+                      reason="turn_cap" if state["capped"] else "moderator", ts=_now_iso())
+        _write_json(ch, ch / "VERDICT.json", record)
+        return record
+
+
 # --- pinned references -------------------------------------------------------
 
 
@@ -296,38 +452,52 @@ def send(root: Path, channel: str, agent: str, harness: str, body: str,
     if pinned:
         record["refs"] = pinned
     record.update(_extra or {})
-    for _ in range(10000):
-        seqs = _existing_seqs(msgs_dir)
-        seq = (seqs[-1] if seqs else 0) + 1
-        record["seq"] = seq
-        record["id"] = f"{channel}:{seq:0{SEQ_WIDTH}d}"
-        record["ts"] = _now_iso()
-        tmp = tmp_dir / f"{uuid.uuid4().hex}.json"
-        tmp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-        try:
-            os.link(tmp, _message_path(msgs_dir, seq))
-        except FileExistsError:
+    with _channel_lock(ch):
+        cfg = channel_config(ch)
+        # Persist the initial default once so changing env cannot lift a live cap.
+        if not (ch / "config.json").exists():
+            _write_json(ch, ch / "config.json", cfg)
+        if _closed(ch):
+            raise BusError(f"channel {channel} is closed")
+        state = _turn_state(ch, cfg=cfg)
+        _record_cap(ch, state)
+        if state["capped"]:
+            raise TurnCapError(f"turn cap {state['cap']} reached on {channel}; "
+                               "a moderator must close or raise it")
+        for _ in range(10000):
+            seqs = _existing_seqs(msgs_dir)
+            seq = (seqs[-1] if seqs else 0) + 1
+            record["seq"] = seq
+            record["id"] = f"{channel}:{seq:0{SEQ_WIDTH}d}"
+            record["ts"] = _now_iso()
+            tmp = tmp_dir / f"{uuid.uuid4().hex}.json"
+            tmp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+            try:
+                os.link(tmp, _message_path(msgs_dir, seq))
+            except FileExistsError:
+                tmp.unlink(missing_ok=True)
+                time.sleep(0.002)
+                continue
             tmp.unlink(missing_ok=True)
-            time.sleep(0.002)
-            continue
-        tmp.unlink(missing_ok=True)
+            break
+        else:
+            raise BusError("could not claim a message id after 10000 attempts")
+        _record_cap(ch, _turn_state(ch, cfg=cfg))
         verdict_path = ch / "VERDICT.json"
-        with _flock(ch / ".verdict.lock"):  # vs a post_done publishing from an older snapshot
-            if verdict_path.is_file() and not status(root, channel)["complete"]:
-                verdict_path.unlink(missing_ok=True)
-        # Tell the sender which peers can be woken; --wake forces it now.
-        peers = [w["agent"] for w in list_wakes(root, channel) if w["agent"] != agent]
-        result = dict(record, wake_registered=peers)
-        if wake:
-            result["woken"] = [
-                wake_agent(root, channel, peer, seq=seq, force=True,
-                           cooldown=cooldown, source="send --wake")
-                for peer in peers
-            ]
-        if for_agent:
-            result["notified"] = _notify(root, ch, record)
-        return result
-    raise BusError("could not claim a message id after 10000 attempts")
+        if verdict_path.is_file() and not status(root, channel)["complete"]:
+            verdict_path.unlink(missing_ok=True)
+    # Tell the sender which peers can be woken; --wake forces it now.
+    peers = [w["agent"] for w in list_wakes(root, channel) if w["agent"] != agent]
+    result = dict(record, wake_registered=peers)
+    if wake:
+        result["woken"] = [
+            wake_agent(root, channel, peer, seq=seq, force=True,
+                       cooldown=cooldown, source="send --wake")
+            for peer in peers
+        ]
+    if for_agent:
+        result["notified"] = _notify(root, ch, record)
+    return result
 
 
 def _cursor_path(ch: Path, agent: str) -> Path:
@@ -490,9 +660,9 @@ def post_done(root: Path, channel: str, agent: str, harness: str,
     wake_cleared = False if keep_wake else clear_wake(root, channel, agent)
     # Snapshot and publish under one lock, so the last writer always saw every
     # done record and every participant that posted before it.
-    with _flock(ch / ".verdict.lock"):
+    with _channel_lock(ch):
         st = status(root, channel)
-        if st["complete"]:
+        if st["complete"] and not _closed(ch):
             tmp = ch / "tmp" / f"verdict-{uuid.uuid4().hex}"
             tmp.write_text(json.dumps({
                 "channel": channel, "complete": True, "verdict": st["verdict"],
@@ -578,6 +748,12 @@ def status(root: Path, channel: str, silent_after: float = DEFAULT_SILENT) -> di
     if complete:
         verdict = ("PASS" if all(p["done"]["verdict"] == "PASS" for p in participants if p["done"])
                    else "FAIL")
+    limits = _turn_state(ch, msgs)
+    closed = _closed(ch)
+    if closed:
+        complete, verdict = True, closed["verdict"]
+    elif limits["capped"]:
+        complete, verdict = False, None
     # Polled, watched, or spawned, but never posted: shown, never a signatory.
     seen = set()
     if (ch / "heartbeats").is_dir():
@@ -592,6 +768,7 @@ def status(root: Path, channel: str, silent_after: float = DEFAULT_SILENT) -> di
         "channel": channel,
         "root": str(root),
         "message_count": len(msgs),
+        **limits,
         "last_seq": msgs[-1]["seq"] if msgs else 0,
         "participants": participants,
         "readers": readers,
@@ -709,6 +886,17 @@ def _launch_wake(root: Path, channel: str, agent: str, seq: int, force: bool,
     subprocess (`bus _supervise`) so the exit code gets logged even when the
     caller cannot wait for a whole resumed harness session."""
     ch = _channel_dir(root, channel)
+    with _channel_lock(ch):
+        if _turn_state(ch)["capped"] or _closed(ch):
+            return {"channel": channel, "agent": agent, "seq": seq, "forced": force,
+                    "woke": False, "reason": "channel capped or closed"}, None
+        return _launch_wake_locked(root, channel, agent, seq, force, cooldown, idle, source)
+
+
+def _launch_wake_locked(root: Path, channel: str, agent: str, seq: int, force: bool,
+                        cooldown: float, idle: float, source: str
+                        ) -> tuple[dict, subprocess.Popen | None]:
+    ch = _channel_dir(root, channel)
     result = {"channel": channel, "agent": agent, "seq": seq, "forced": force,
               "woke": False, "reason": ""}
     # Check and reserve under one lock: a send --wake racing watch-wake launches once.
@@ -797,6 +985,8 @@ def _sweep(root: Path, cooldown: float, idle: float, source: str
     for info in list_channels(root):
         channel = info["channel"]
         ch = root / channel
+        if _turn_state(ch)["capped"] or _closed(ch):
+            continue
         regs = list_wakes(root, channel)
         if not regs:
             continue
@@ -1179,6 +1369,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--keep-wake", action="store_true",
                    help="leave your wake registration in place after done")
 
+    p = sub.add_parser("config", parents=[common], help="set or show the channel turn budget")
+    p.add_argument("--max-turns", type=int)
+    p.add_argument("--moderator", help="named agent allowed to close or change the budget")
+
+    p = sub.add_parser("close", parents=[common], help="moderator: close the channel permanently")
+    p.add_argument("--verdict", required=True, choices=VERDICTS)
+    p.add_argument("--summary", required=True)
+
+    p = sub.add_parser("raise-cap", parents=[common], help="moderator: add to the turn budget")
+    p.add_argument("--by", type=int, required=True)
+
     p = sub.add_parser("status", parents=[common],
                        help="participants, liveness, verdicts, complete flag for the channel")
     p.add_argument("--silent-after", type=float, default=DEFAULT_SILENT / 60,
@@ -1241,7 +1442,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         cfg = load_config()
-        root = resolve_root(args.root or os.environ.get("AGENT_BUS_DIR") or cfg.get("root"))
+        root = resolve_root(args.root or os.environ.get("AGENT_BUS_DIR")
+                            or os.environ.get("AGENT_BUS_ROOT") or cfg.get("root"))
         args.channel = (args.channel or os.environ.get("AGENT_BUS_CHANNEL")
                         or cfg.get("channel") or DEFAULT_CHANNEL)
         if args.command == "send":
@@ -1278,6 +1480,17 @@ def main(argv: list[str] | None = None) -> int:
             agent, harness = _identity(args, cfg)
             result = post_done(root, args.channel, agent, harness, args.verdict, args.summary,
                                keep_wake=args.keep_wake, phase=args.phase)
+        elif args.command == "config":
+            agent = args.agent or os.environ.get("AGENT_BUS_AGENT") or cfg.get("agent")
+            harness = args.harness or os.environ.get("AGENT_BUS_HARNESS") or cfg.get("harness")
+            result = configure_channel(root, args.channel, args.max_turns, args.moderator,
+                                       agent, harness)
+        elif args.command == "close":
+            agent, harness = _identity(args, cfg)
+            result = close_channel(root, args.channel, agent, harness, args.verdict, args.summary)
+        elif args.command == "raise-cap":
+            agent, harness = _identity(args, cfg)
+            result = raise_cap(root, args.channel, agent, harness, args.by)
         elif args.command == "status":
             result = status(root, args.channel, silent_after=args.silent_after * 60)
         elif args.command == "channels":
@@ -1317,7 +1530,7 @@ def main(argv: list[str] | None = None) -> int:
                               args.source, args.forced)
     except BusError as err:
         print(f"error: {err}", file=sys.stderr)
-        return 2
+        return 4 if isinstance(err, TurnCapError) else 2
     print(json.dumps(result, indent=2))
     return 0
 

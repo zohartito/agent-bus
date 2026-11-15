@@ -22,7 +22,8 @@ TOOLS = [
     {
         "name": "bus_send",
         "description": "Post one message to the shared agent-bus channel. "
-                       "Peers see it on their next bus_recv. Never put secrets on the bus.",
+                       "Peers see it on their next bus_recv. Refused at the channel turn cap; "
+                       "a moderator must close or raise it. Never put secrets on the bus.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -89,7 +90,8 @@ TOOLS = [
     {
         "name": "bus_status",
         "description": "Channel status: participants, liveness (heartbeat age, live watch, silent, "
-                       "spawned process alive), per-agent and per-phase verdicts, complete flag.",
+                       "spawned process alive), per-agent and per-phase verdicts, complete flag, "
+                       "turns_used, cap and capped.",
         "inputSchema": {"type": "object", "properties": {
             "channel": {"type": "string"},
             "silent_after_min": {"type": "number",
