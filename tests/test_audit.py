@@ -119,3 +119,62 @@ class McpWakeTests(unittest.TestCase):
             self.assertTrue(results[2]['isError'])
             self.assertEqual(bus.wake_agent(root, 'ch', 'victim', wait=True)['exit_code'], 0)
             self.assertEqual(marker.read_text(), argv[-1])
+
+
+class DaemonTests(unittest.TestCase):
+    def test_concurrent_daemons_have_one_lifetime_owner(self):
+        import tempfile
+        import time
+        code = '''
+import os, sys, time
+from pathlib import Path
+import bus
+root = Path(sys.argv[1])
+original = Path.write_text
+def delayed_write(path, *args, **kwargs):
+    if path.name == 'watch-wake.pid':
+        time.sleep(0.4)  # widen the old check/write race after both starts
+    return original(path, *args, **kwargs)
+Path.write_text = delayed_write
+def sweep(*args):
+    (root / ('entered-' + str(os.getpid()))).touch()
+    return [], []
+bus._sweep = sweep
+(root / ('ready-' + str(os.getpid()))).touch()
+while len(list(root.glob('ready-*'))) < 2:
+    time.sleep(0.01)
+try:
+    bus.watch_wake(root, poll=0.05)
+except bus.BusError:
+    sys.exit(2)
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            procs = [subprocess.Popen([sys.executable, '-c', code, tmp], cwd=REPO,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                     for _ in range(2)]
+            try:
+                deadline = time.monotonic() + 5
+                while not list(Path(tmp).glob('entered-*')) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                time.sleep(0.6)
+                self.assertEqual(len(list(Path(tmp).glob('entered-*'))), 1)
+                self.assertEqual(sum(p.poll() is None for p in procs), 1)
+            finally:
+                for p in procs:
+                    if p.poll() is None:
+                        p.terminate()
+                    p.communicate(timeout=5)
+
+    def test_daemon_exit_preserves_another_pid_receipt(self):
+        import bus
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            def replaced(*args):
+                (root / 'watch-wake.pid').write_text('other-owner\n')
+                raise KeyboardInterrupt
+            with patch.object(bus, '_sweep', side_effect=replaced), patch.object(bus.signal, 'signal'):
+                bus.watch_wake(root)
+            self.assertTrue((root / 'watch-wake.pid').exists())
+            self.assertEqual((root / 'watch-wake.pid').read_text(), 'other-owner\n')

@@ -1060,14 +1060,18 @@ def watch_wake(root: Path, cooldown: float = DEFAULT_COOLDOWN, idle: float = DEF
     if once:
         print(json.dumps(sweep_wakes(root, cooldown, idle, wait=True), indent=2))
         return 0
+    if fcntl is None:
+        raise BusError("watch-wake requires POSIX fcntl for lifetime locking")
+    with _flock(root / "watch-wake.lock", blocking=False) as owned:
+        if not owned:
+            raise BusError("watch-wake is already running on this machine")
+        return _watch_wake_owned(root, cooldown, idle, poll)
+
+
+def _watch_wake_owned(root: Path, cooldown: float, idle: float, poll: float) -> int:
     pid_path = root / "watch-wake.pid"
-    try:
-        other = int(pid_path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        other = None
-    if other and other != os.getpid() and _pid_alive(other):
-        raise BusError(f"watch-wake is already running on this machine (pid {other})")
-    pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    receipt = f"{os.getpid()}\n"
+    pid_path.write_text(receipt, encoding="utf-8")
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # so `kill` still removes the pid file
     print(f"watch-wake: root={root} cooldown={cooldown:g}s idle={idle:g}s poll={poll:g}s",
           file=sys.stderr, flush=True)
@@ -1083,7 +1087,11 @@ def watch_wake(root: Path, cooldown: float = DEFAULT_COOLDOWN, idle: float = DEF
     except KeyboardInterrupt:
         pass
     finally:
-        pid_path.unlink(missing_ok=True)
+        try:
+            if pid_path.read_text(encoding="utf-8") == receipt:
+                pid_path.unlink(missing_ok=True)
+        except FileNotFoundError:
+            pass
     return 0
 
 

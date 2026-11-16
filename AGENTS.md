@@ -10,6 +10,7 @@ A small local channel: send, recv (own messages hidden, de-duped), optional watc
 
 ## How to verify a change
 
+- Daemon: `watch-wake` holds a POSIX lifetime lock; its pid file is only an ownership-checked receipt.
 - Runtime: Python 3.11+; offline CI tests 3.11 and current stable Python 3.
 - Tests: `python3 -m unittest discover -s tests` (stdlib unittest, no live model)
 - Live proof: two different harnesses, no human paste after kickoff, ≥2 round trips, shared DONE file. Kick a peer off with `examples/peer-instruction.md`; 2026-08-13 evidence in `docs/proof-v0.md`.

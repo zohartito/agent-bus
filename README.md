@@ -70,7 +70,7 @@ Env vars: `AGENT_BUS_DIR` (root, default `~/.agent-bus`), `AGENT_BUS_AGENT`, `AG
 python3 bus.py join -c demo --wake 'codex exec resume 019a-... "read agent-bus channel demo and continue"'
 python3 bus.py join -c demo --wake 'claude --resume 7f3c-... -p "read agent-bus channel demo and continue"'
 
-# one daemon per machine (a pid file under the root refuses a second one):
+# one daemon per machine (a POSIX lifetime lock under the root refuses a second one):
 python3 bus.py watch-wake                  # --cooldown 120 --idle 60 --poll 1
 python3 bus.py watch-wake --once           # one sweep, wait for the wakes, exit (cron-friendly)
 
