@@ -192,3 +192,100 @@ class DoneDocumentationTests(unittest.TestCase):
                                    *shlex.split(command), '--root', tmp, '--as', 'a', '--harness', 'fake'],
                                   cwd=tmp, capture_output=True, text=True)
             self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+class MailboxFilesystemTests(unittest.TestCase):
+    def test_channel_symlink_cannot_write_outside_root(self):
+        import bus
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root, outside = Path(tmp) / 'bus', Path(tmp) / 'outside'
+            root.mkdir()
+            outside.mkdir()
+            (root / 'evil').symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(bus.BusError):
+                bus.send(root, 'evil', 'a', 'fake', 'escaped')
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_nested_directory_and_file_symlinks_are_refused(self):
+        import bus
+        import tempfile
+        for component in ('messages', 'tmp', 'wake', '.verdict.lock', 'config.json'):
+            with self.subTest(component=component), tempfile.TemporaryDirectory() as tmp:
+                root, outside = Path(tmp) / 'bus', Path(tmp) / 'outside'
+                ch = root / 'ch'
+                ch.mkdir(parents=True)
+                if '.' in component:
+                    outside.write_text('do not change')
+                else:
+                    outside.mkdir()
+                (ch / component).symlink_to(outside, target_is_directory=outside.is_dir())
+                with self.assertRaises(bus.BusError):
+                    bus.send(root, 'ch', 'a', 'fake', 'escaped')
+                if outside.is_file():
+                    self.assertEqual(outside.read_text(), 'do not change')
+                else:
+                    self.assertEqual(list(outside.iterdir()), [])
+
+    def test_mailbox_modes_are_private_even_with_permissive_umask(self):
+        import bus
+        import stat
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'bus'
+            previous = os.umask(0o022)
+            try:
+                bus.send(root, 'ch', 'a', 'fake', 'private')
+                bus.recv(root, 'ch', 'b')
+                bus.post_done(root, 'ch', 'a', 'fake', 'PASS', 'finished', phase='one')
+                bus.register_wake(root, 'ch', 'b', 'fake', 'echo approved')
+            finally:
+                os.umask(previous)
+            for path in [root, *root.rglob('*')]:
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode),
+                                 0o700 if path.is_dir() else 0o600, str(path))
+
+    def test_existing_owned_permissions_are_repaired_and_foreign_owner_refused(self):
+        import bus
+        import stat
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'bus'
+            bus.send(root, 'ch', 'a', 'fake', 'first')
+            root.chmod(0o755)
+            message = root / 'ch' / 'messages' / '00000001.json'
+            message.chmod(0o644)
+            bus.recv(root, 'ch', 'b')
+            self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(message.stat().st_mode), 0o600)
+            with patch.object(os, 'getuid', return_value=os.getuid() + 1):
+                with self.assertRaises(bus.BusError):
+                    bus.send(root, 'ch', 'a', 'fake', 'refused')
+
+    def test_replaced_parent_cannot_redirect_an_open_write(self):
+        import bus
+        import mailbox_fs
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root, outside = Path(tmp) / 'bus', Path(tmp) / 'outside'
+            outside.mkdir()
+            ch = bus._channel_dir(root, 'ch', create=True)
+            original_open = os.open
+            swapped = False
+            def swap_after_open(name, flags, *args, **kwargs):
+                nonlocal swapped
+                fd = original_open(name, flags, *args, **kwargs)
+                if name == 'tmp' and flags & os.O_DIRECTORY and not swapped:
+                    swapped = True
+                    (root / 'ch' / 'tmp').rename(root / 'ch' / 'held-tmp')
+                    (root / 'ch' / 'tmp').symlink_to(outside, target_is_directory=True)
+                return fd
+            # Keep the platform capability check true while instrumenting open.
+            with patch.object(mailbox_fs.os, 'open', side_effect=swap_after_open) as instrumented, \
+                    patch.object(os, 'supports_dir_fd', os.supports_dir_fd | {instrumented}):
+                (ch / 'tmp' / 'probe').write_text('safe')
+            self.assertTrue(swapped)
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual((root / 'ch' / 'held-tmp' / 'probe').read_text(), 'safe')

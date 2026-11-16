@@ -11,7 +11,7 @@ A small local channel: send, recv (own messages hidden, de-duped), optional watc
 ## How to verify a change
 
 - Daemon: `watch-wake` holds a POSIX lifetime lock; its pid file is only an ownership-checked receipt.
-- Runtime: Python 3.11+; offline CI tests 3.11 and current stable Python 3.
+- Runtime: POSIX (macOS/Linux) no-follow mailbox I/O; Python 3.11+; offline CI tests 3.11 and current stable Python 3.
 - Tests: `python3 -m unittest discover -s tests` (stdlib unittest, no live model)
 - Live proof: two different harnesses, no human paste after kickoff, ≥2 round trips, shared DONE file. Kick a peer off with `examples/peer-instruction.md`; 2026-08-13 evidence in `docs/proof-v0.md`.
 - Crew (commands, not live agents): `python3 crew.py desk --dry-run examples/crew-four.toml`
@@ -20,6 +20,7 @@ A small local channel: send, recv (own messages hidden, de-duped), optional watc
 
 Keep it tiny. Protocol and tests before a desktop app. MCP stdio + a CLI are the product surface. Do not add a hosted service in v0. Do not modify `bus.py` / `mcp_server.py` for crew launcher features; `spawn` (one detached peer plus its wake) is the only launcher verb in `bus.py`.
 
+- `mailbox_fs.py` — private POSIX directory-relative mailbox I/O; rejects symlinks and foreign ownership.
 - `bus.py` — core + CLI: send / recv / watch / done / status / channels / verify-refs / join / wake / spawn / watch-wake; identity from `--as`, env, or `.agent-bus.toml`
 - `mcp_server.py` — stdio MCP over the same core: bus_send, bus_recv, bus_done, bus_status, bus_channels, bus_register_wake, bus_wake, bus_verify_refs
 - `crew.py` — tmux crew: `desk` is the clickable window; `up` still launches every seat at once

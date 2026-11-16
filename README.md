@@ -6,7 +6,7 @@ This is Zohar's (`github.com/zohartito/agent-bus`). It is not BridgeMind.
 
 v0 is a local file mailbox: one directory per channel under `~/.agent-bus`, one JSON file per message, monotonic gapless ids claimed with an atomic hard link. Stdlib Python only — no dependencies, no daemon, no hosted service. The product surface is a CLI (`bus.py`) and a stdio MCP server (`mcp_server.py`) over the same core. The original build spec is [`GOAL.md`](GOAL.md).
 
-Install: clone this repository. It needs only Python 3.11 or newer (standard library), so there is nothing else to install. Run `python3 bus.py` from the checkout as shown below; replace `/path/to/agent-bus` in the examples with your checkout's path.
+Install: clone this repository on a POSIX system (macOS or Linux; secure mailbox access requires no-follow directory operations). It needs only Python 3.11 or newer (standard library), so there is nothing else to install. Run `python3 bus.py` from the checkout as shown below; replace `/path/to/agent-bus` in the examples with your checkout's path.
 
 ## Quick start: you direct, `spawn` starts the peer
 
@@ -60,6 +60,8 @@ Without a config file, `--as NAME --harness H` or the env vars work the same; pr
   - Close writes a permanent `VERDICT.json` with `closed_by` and `reason` (`turn_cap` or `moderator`); raising retains the original cap receipt.
 - **Tripwire**: `send` refuses bodies that look like credentials (AWS/GitHub/Slack/`sk-` keys, private key blocks, JWTs). `--allow-secret-like` overrides a false positive. Secrets never go on the bus; the bus carries messages and file paths, not publishes.
 - **Wake**: a message is only seen on the next `recv`, so a participant whose session has ended never hears it. `join --wake "<command>"` registers, per agent per channel, the shell command that resumes *that agent's own* session (`wake/<agent>.json`, with harness and registration time). The `watch-wake` daemon runs it when a message from someone else lands past that agent's cursor and the agent is not polling — every `recv`/`watch` touches `heartbeats/<agent>`, and a heartbeat younger than `--idle` (60 s) means "leave me alone". One wake per message, at most one per `--cooldown` (120 s) per agent, so a chatty peer cannot spawn sessions in a loop. `send --wake` forces it regardless of the heartbeat (the cooldown still holds). `done` clears your registration unless `--keep-wake`. Every wake is logged to `wake/log.jsonl` with the triggering seq and the command's exit code; the resumed harness's output lands in `wake/<agent>.out`. The wake command runs with `AGENT_BUS_AGENT`/`HARNESS`/`CHANNEL`/`DIR` set to the *woken* agent, whoever triggered it.
+
+Mailbox storage rejects symlinks at the configured root and below it. Operations use directory descriptors so replacing a checked path with a symlink cannot redirect file access. Ancestors outside the configured root are trusted. Directories are created as 0700 and files as 0600; access validates ownership and tightens existing owned entries to those modes. Entries owned by another user are refused. Permission checks also apply during reads.
 
 Env vars: `AGENT_BUS_DIR` (root, default `~/.agent-bus`), `AGENT_BUS_AGENT`, `AGENT_BUS_HARNESS`, `AGENT_BUS_CHANNEL` (default `main`); each also has a flag (`--root`, `--as`, `--harness`, `-c`) and an `.agent-bus.toml` key (`root`, `agent`, `harness`, `channel`). Point `AGENT_BUS_DIR` at a synced folder and the same protocol crosses machines; that stays out of scope for v0.
 
