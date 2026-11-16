@@ -106,14 +106,20 @@ class MailboxPath:
 
     def open_fd(self, flags, mode=0o600):
         with self.parent._dir_fd() as parent:
-            try:
-                # Validate before truncating an existing file, and never block on a FIFO.
-                fd = os.open(self.name, (flags & ~os.O_TRUNC) | os.O_NOFOLLOW | os.O_NONBLOCK,
-                             0o600, dir_fd=parent)
-            except OSError as err:
-                if err.errno == errno.ELOOP:
-                    raise MailboxError('symlink in mailbox path') from err
-                raise
+            for attempt in range(3):
+                try:
+                    # Validate before truncating an existing file, and never block on a FIFO.
+                    fd = os.open(self.name, (flags & ~os.O_TRUNC) | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                 0o600, dir_fd=parent)
+                    break
+                except OSError as err:
+                    # Darwin can report ENOENT when O_CREAT|O_NOFOLLOW races another
+                    # creator. Retry against the same held parent with no flags weakened.
+                    if err.errno == errno.ENOENT and flags & os.O_CREAT and attempt < 2:
+                        continue
+                    if err.errno == errno.ELOOP:
+                        raise MailboxError('symlink in mailbox path') from err
+                    raise
             try:
                 self._validate(fd, writing=bool(flags & (os.O_WRONLY | os.O_RDWR)))
                 if flags & os.O_TRUNC:

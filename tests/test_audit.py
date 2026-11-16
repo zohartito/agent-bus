@@ -298,6 +298,29 @@ class MailboxFilesystemTests(unittest.TestCase):
             self.assertEqual((root / 'ch' / 'held-tmp' / 'probe').read_text(), 'safe')
 
 
+    def test_no_follow_creation_retries_a_concurrent_creator_race(self):
+        import bus
+        import errno
+        import mailbox_fs
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            original_open = os.open
+            attempts = 0
+            def create_race(name, flags, *args, **kwargs):
+                nonlocal attempts
+                if name == '.verdict.lock' and flags & os.O_CREAT:
+                    attempts += 1
+                    if attempts == 1:
+                        raise FileNotFoundError(errno.ENOENT, 'concurrent no-follow creation', name)
+                return original_open(name, flags, *args, **kwargs)
+            with patch.object(mailbox_fs.os, 'open', side_effect=create_race) as instrumented, \
+                    patch.object(os, 'supports_dir_fd', os.supports_dir_fd | {instrumented}):
+                sent = bus.send(Path(tmp), 'ch', 'a', 'fake', 'first')
+            self.assertEqual(sent['seq'], 1)
+            self.assertEqual(attempts, 2)
+
+
 class ShortcutTests(unittest.TestCase):
     def test_unmanaged_shortcut_collisions_are_preserved(self):
         import crew
