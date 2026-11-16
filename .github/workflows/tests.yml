@@ -1,0 +1,27 @@
+name: Offline tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3"]
+    container: python:${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run offline suite in an isolated home
+        shell: bash
+        run: |
+          export HOME="$RUNNER_TEMP/agent-bus-home"
+          export TMPDIR="$RUNNER_TEMP/agent-bus-tmp"
+          export PYTHONDONTWRITEBYTECODE=1
+          mkdir -p "$HOME" "$TMPDIR"
+          python3 -m unittest discover -s tests

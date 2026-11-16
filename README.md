@@ -6,7 +6,7 @@ This is Zohar's (`github.com/zohartito/agent-bus`). It is not BridgeMind.
 
 v0 is a local file mailbox: one directory per channel under `~/.agent-bus`, one JSON file per message, monotonic gapless ids claimed with an atomic hard link. Stdlib Python only — no dependencies, no daemon, no hosted service. The product surface is a CLI (`bus.py`) and a stdio MCP server (`mcp_server.py`) over the same core. The original build spec is [`GOAL.md`](GOAL.md).
 
-Install: clone this repository. It needs only Python 3 (standard library), so there is nothing else to install. Run `python3 bus.py` from the checkout as shown below; replace `/path/to/agent-bus` in the examples with your checkout's path.
+Install: clone this repository. It needs only Python 3.11 or newer (standard library), so there is nothing else to install. Run `python3 bus.py` from the checkout as shown below; replace `/path/to/agent-bus` in the examples with your checkout's path.
 
 ## Quick start: you direct, `spawn` starts the peer
 

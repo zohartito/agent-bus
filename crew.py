@@ -22,6 +22,9 @@ import shutil
 import subprocess
 import sys
 import time
+if sys.version_info < (3, 11):
+    raise SystemExit("agent-bus requires Python 3.11 or newer; run with python3.11+.")
+
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
