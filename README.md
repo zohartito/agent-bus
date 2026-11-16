@@ -156,7 +156,7 @@ Prerequisites: Python 3.11+, tmux 3.2+ on PATH, and the harness CLIs you intend 
 
 This is for you, not for an agent. **After that setup, normal use requires no typing:** double-click **Crew** on the Desktop, then use the mouse. A window opens with four empty seats and a compact control dock: Orch, Scout, Claude, Codex.
 
-Each row has **Load**, provider, effort, and (workers only) **Remove**. **+ Custom** walks through name → provider → effort. **Load all** opens every agent and deliberately sends no prompt, task, or mailbox message. Loading and briefing are separate human decisions. The dock says whether anyone has actually spoken. **Shut down** closes Crew. Opening Crew again moves the one live workspace to the new window instead of making competing copies.
+Each row has **Load** and provider controls, plus **Remove** for workers. Claude and cursor-agent rows also have an effort control; Codex rows do not. **+ Custom** walks through name → provider → effort. **Load all** opens every agent and deliberately sends no prompt, task, or mailbox message. Loading and briefing are separate human decisions. The dock says whether anyone has actually spoken. **Shut down** closes Crew. Opening Crew again moves the one live workspace to the new window instead of making competing copies.
 
 The team is not fixed at four. Use **−1**, **+1**, or **+4** to resize quickly; new seats are balanced across the available providers. Use **+ Custom** when you want to pick the name, provider, and effort yourself. Larger rosters are paged in the dock, and new panes split the largest open seat so the workspace stays balanced.
 
