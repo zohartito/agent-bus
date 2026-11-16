@@ -6,7 +6,7 @@ Harness-neutral mailbox two live coding-agent sessions can poll. Not a one-shot 
 
 A small local channel: send, recv (own messages hidden, de-duped), optional watch, explicit DONE, and wake-on-message (`join --wake` registers a resume command; `watch-wake` runs it for a participant that is behind and not polling). `spawn` starts a peer detached and registers its resume as its wake; `status` shows who is watching, silent, or dead. Any two harnesses that can call MCP or the CLI should work. The pair is not Codex+Cursor specifically.
 
-`crew.py desk` is the human app: a tmux window with named agent panes and a clickable card bar (add, delete, provider, effort). Double-click `Crew` on the Desktop. The mailbox does not depend on it.
+`crew.py desk` is the human app: a tmux window with named agent panes and a clickable card bar (add, delete, provider, effort). Requires tmux 3.2+; run `python3 crew.py shortcut` once on macOS, then double-click `Crew` on the Desktop. Shipped configs resolve cwd from the checkout; seat prompts use `AGENT_BUS_CHECKOUT` supplied by Crew. The mailbox does not depend on it.
 
 ## How to verify a change
 

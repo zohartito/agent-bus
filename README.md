@@ -20,13 +20,15 @@ channel = "case-r14"
 ```
 
 ```bash
-BUS="python3 $HOME/projects/agent-bus/bus.py"
-$BUS send --kind plan --body "Plan: you model the lid, I review. Your move."
-$BUS spawn --agent codex -- codex exec -m gpt-6-astra -c 'model_reasoning_effort="high"' \
+# Run this setup from the repository checkout.
+export AGENT_BUS_CHECKOUT="$PWD"
+BUS() { python3 "$AGENT_BUS_CHECKOUT/bus.py" "$@"; }
+BUS send --kind plan --body "Plan: you model the lid, I review. Your move."
+BUS spawn --agent codex -- codex exec -m gpt-6-astra -c 'model_reasoning_effort="high"' \
     --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$(cat peer-prompt.md)"
-$BUS watch --body-only    # blocks until codex posts; prints just the new bodies
-$BUS status               # who is watching, who went silent, is the peer process alive
-$BUS done --verdict PASS --summary "lid modelled and reviewed"
+BUS watch --body-only    # blocks until codex posts; prints just the new bodies
+BUS status               # who is watching, who went silent, is the peer process alive
+BUS done --verdict PASS --summary "lid modelled and reviewed"
 ```
 
 `peer-prompt.md` is the peer's standing instruction — see [`TRY.md`](TRY.md) for a complete one. `spawn` starts the peer in its own session (it survives your shell), puts `AGENT_BUS_AGENT/HARNESS/CHANNEL/DIR` in its env so its bus calls need no flags, reads its session id, and registers the matching resume as its wake — see [Spawn a peer](#spawn-a-peer).
@@ -146,7 +148,9 @@ cursor-agent (`~/.cursor/mcp.json`) and Gemini CLI (`~/.gemini/settings.json`), 
 
 ## Crew (the window you click)
 
-This is for you, not for an agent. **Normal use requires no typing:** double-click **Crew** on the Desktop, then use the mouse. A window opens with four empty seats and a compact control dock: Orch, Scout, Claude, Codex.
+Prerequisites: Python 3.11+, tmux 3.2+ on PATH, and the harness CLIs you intend to load. On macOS, run `python3 crew.py shortcut` once from the checkout to install **Crew.app** and **Crew.command** on the Desktop. The shipped configs resolve their working directory relative to the checkout.
+
+This is for you, not for an agent. **After that setup, normal use requires no typing:** double-click **Crew** on the Desktop, then use the mouse. A window opens with four empty seats and a compact control dock: Orch, Scout, Claude, Codex.
 
 Each row has **Load**, provider, effort, and (workers only) **Remove**. **+ Custom** walks through name → provider → effort. **Load all** opens every agent and deliberately sends no prompt, task, or mailbox message. Loading and briefing are separate human decisions. The dock says whether anyone has actually spoken. **Shut down** closes Crew. Opening Crew again moves the one live workspace to the new window instead of making competing copies.
 

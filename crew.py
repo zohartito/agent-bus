@@ -250,6 +250,7 @@ def _cursor_model_for_effort(model: str, effort: str) -> str:
 
 def seat_env(cfg: Crew, seat: Seat) -> dict[str, str]:
     return {
+        "AGENT_BUS_CHECKOUT": str(REPO),
         "AGENT_BUS_AGENT": seat.name,
         "AGENT_BUS_HARNESS": seat.harness,
         "AGENT_BUS_CHANNEL": cfg.channel,
