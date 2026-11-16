@@ -1051,7 +1051,13 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    return True
+    # An orphan that its new parent has not reaped yet still answers kill(pid, 0). On Linux,
+    # /proc reports it as a zombie (state Z): it has exited and will never read the bus again.
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return True
+    return state != "Z"
 
 
 def watch_wake(root: Path, cooldown: float = DEFAULT_COOLDOWN, idle: float = DEFAULT_IDLE,
