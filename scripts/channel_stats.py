@@ -13,6 +13,7 @@ import bus
 
 
 def scan(root: Path) -> list[dict]:
+    root = bus.MailboxPath(root)
     rows = []
     for folder in sorted(root.iterdir()) if root.is_dir() else ():
         if not (folder / "messages").is_dir():
