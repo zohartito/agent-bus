@@ -128,7 +128,8 @@ TOOLS = [
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "hook_id": {"type": "string", "enum": list(WAKE_HOOKS),
+                "hook_id": {"type": "string",
+                            **({"enum": list(WAKE_HOOKS)} if WAKE_HOOKS else {}),
                             "description": "Operator-configured hook ID."},
                 "channel": {"type": "string"},
                 "clear": {"type": "boolean", "description": "Remove your registration instead."},

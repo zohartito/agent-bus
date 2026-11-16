@@ -86,6 +86,13 @@ class McpWakeTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return [json.loads(line)['result'] for line in proc.stdout.splitlines()]
 
+    def test_unconfigured_hook_schema_does_not_have_an_empty_enum(self):
+        import mcp_server
+        # The shipped default has no approved hooks; an empty enum is invalid JSON Schema.
+        schema = next(t['inputSchema'] for t in mcp_server.TOOLS
+                      if t['name'] == 'bus_register_wake')
+        self.assertNotEqual(schema['properties']['hook_id'].get('enum'), [])
+
     def test_model_cannot_register_peer_command_with_altered_whitespace(self):
         import bus
         import shlex
