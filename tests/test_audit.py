@@ -289,3 +289,75 @@ class MailboxFilesystemTests(unittest.TestCase):
             self.assertTrue(swapped)
             self.assertEqual(list(outside.iterdir()), [])
             self.assertEqual((root / 'ch' / 'held-tmp' / 'probe').read_text(), 'safe')
+
+
+class ShortcutTests(unittest.TestCase):
+    def test_unmanaged_shortcut_collisions_are_preserved(self):
+        import crew
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            (dest / 'Crew.app').mkdir()
+            notes = dest / 'Crew.app' / 'my-notes.txt'
+            notes.write_text('unrelated notes')
+            command = dest / 'Crew.command'
+            command.write_text('unrelated command')
+            with self.assertRaises(crew.CrewError):
+                crew.install_shortcut(dest)
+            self.assertEqual(notes.read_text(), 'unrelated notes')
+            self.assertEqual(command.read_text(), 'unrelated command')
+
+    def test_managed_shortcuts_are_backed_up_before_replacement(self):
+        import crew
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            crew.install_shortcut(dest)
+            notes = dest / 'Crew.app' / 'my-notes.txt'
+            notes.write_text('keep this addition')
+            old_command = (dest / 'Crew.command').read_bytes()
+            crew.install_shortcut(dest)
+            backups = list(dest.glob('Crew.app.backup-*'))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual((backups[0] / 'my-notes.txt').read_text(), 'keep this addition')
+            command_backups = list(dest.glob('Crew.command.backup-*'))
+            self.assertEqual(len(command_backups), 1)
+            self.assertEqual(command_backups[0].read_bytes(), old_command)
+
+    def test_failed_staging_leaves_both_installed_shortcuts_intact(self):
+        import crew
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            crew.install_shortcut(dest)
+            notes = dest / 'Crew.app' / 'my-notes.txt'
+            notes.write_text('keep this addition')
+            old_command = (dest / 'Crew.command').read_bytes()
+            with patch.object(crew.shutil, 'copytree', side_effect=OSError('simulated copy failure')):
+                with self.assertRaises((OSError, crew.CrewError)):
+                    crew.install_shortcut(dest)
+            self.assertTrue(notes.is_file())
+            self.assertEqual(notes.read_text(), 'keep this addition')
+            self.assertEqual((dest / 'Crew.command').read_bytes(), old_command)
+
+    def test_failed_second_install_rename_restores_both_shortcuts(self):
+        import crew
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            crew.install_shortcut(dest)
+            notes = dest / 'Crew.app' / 'my-notes.txt'
+            notes.write_text('keep this addition')
+            old_command = (dest / 'Crew.command').read_bytes()
+            original_replace = Path.replace
+            def fail_command(path, target):
+                if path.name == 'Crew.command':
+                    raise OSError('simulated second rename failure')
+                return original_replace(path, target)
+            with patch.object(Path, 'replace', fail_command):
+                with self.assertRaises(crew.CrewError):
+                    crew.install_shortcut(dest)
+            self.assertEqual(notes.read_text(), 'keep this addition')
+            self.assertEqual((dest / 'Crew.command').read_bytes(), old_command)

@@ -24,7 +24,7 @@ Keep it tiny. Protocol and tests before a desktop app. MCP stdio + a CLI are the
 - `bus.py` — core + CLI: send / recv / watch / done / status / channels / verify-refs / join / wake / spawn / watch-wake; identity from `--as`, env, or `.agent-bus.toml`
 - `mcp_server.py` — stdio MCP over the same core: bus_send, bus_recv, bus_done, bus_status, bus_channels, bus_register_wake, bus_wake, bus_verify_refs
 - `crew.py` — tmux crew: `desk` is the clickable window; `up` still launches every seat at once
-- `Crew.app` — double-clickable starter; `python3 crew.py shortcut` puts it on the Desktop
+- `Crew.app` — double-clickable starter; `python3 crew.py shortcut` stages it on the Desktop, refuses unmanaged collisions, and retains managed backups
 - `Open Crew.command` — same starter if you are already in this folder
 - `tests/test_bus.py` — protocol tests
 - `tests/test_crew.py` — config parse + command construction

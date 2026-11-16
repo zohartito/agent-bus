@@ -152,7 +152,7 @@ cursor-agent (`~/.cursor/mcp.json`) and Gemini CLI (`~/.gemini/settings.json`), 
 
 ## Crew (the window you click)
 
-Prerequisites: Python 3.11+, tmux 3.2+ on PATH, and the harness CLIs you intend to load. On macOS, run `python3 crew.py shortcut` once from the checkout to install **Crew.app** and **Crew.command** on the Desktop. The shipped configs resolve their working directory relative to the checkout.
+Prerequisites: Python 3.11+, tmux 3.2+ on PATH, and the harness CLIs you intend to load. On macOS, run `python3 crew.py shortcut` once from the checkout to install **Crew.app** and **Crew.command** on the Desktop. The shipped configs resolve their working directory relative to the checkout. Shortcut installation refuses unrelated or unmarked `Crew.app` / `Crew.command` collisions (move older unmarked installs aside first). Replacing a managed install stages both launchers first and retains `Crew.*.backup-*` copies; an installation failure restores the previous pair.
 
 This is for you, not for an agent. **After that setup, normal use requires no typing:** double-click **Crew** on the Desktop, then use the mouse. A window opens with four empty seats and a compact control dock: Orch, Scout, Claude, Codex.
 

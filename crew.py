@@ -21,6 +21,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 if sys.version_info < (3, 11):
     raise SystemExit("agent-bus requires Python 3.11 or newer; run with python3.11+.")
@@ -1023,17 +1024,50 @@ def install_shortcut(dest_dir: Path | str) -> Path:
     dest_dir = Path(dest_dir).expanduser()
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / "Crew.app"
-    if dest.exists():
-        shutil.rmtree(dest)
-    shutil.copytree(src, dest)
-    _pin_repo(dest / "Contents" / "MacOS" / "Crew")
     cmd = dest_dir / "Crew.command"
-    shutil.copy2(REPO / "Open Crew.command", cmd)
-    _pin_repo(cmd)
-    cmd.chmod(0o755)
-    if shutil.which("xattr"):  # macOS only: clear the quarantine flag so a double-click runs
-        subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(dest), str(cmd)],
+    marker = "agent-bus managed shortcut v1"
+    app_marker = dest / ".agent-bus-shortcut"
+    if dest.is_symlink() or (dest.exists() and (
+            not dest.is_dir() or app_marker.is_symlink() or not app_marker.is_file()
+            or app_marker.read_text(encoding="utf-8").strip() != marker)):
+        raise CrewError("refusing unmanaged Crew.app; move it aside before installing")
+    if cmd.is_symlink() or (cmd.exists() and (
+            not cmd.is_file() or f"# {marker}" not in cmd.read_text(encoding="utf-8").splitlines())):
+        raise CrewError("refusing unmanaged Crew.command; move it aside before installing")
+
+    # Finish both launchers before moving either installed entry. Retain backups.
+    stage = Path(tempfile.mkdtemp(prefix=".crew-stage-", dir=dest_dir))
+    staged_app, staged_cmd = stage / "Crew.app", stage / "Crew.command"
+    shutil.copytree(src, staged_app)
+    _pin_repo(staged_app / "Contents" / "MacOS" / "Crew")
+    (staged_app / ".agent-bus-shortcut").write_text(marker + "\n", encoding="utf-8")
+    shutil.copy2(REPO / "Open Crew.command", staged_cmd)
+    _pin_repo(staged_cmd)
+    lines = staged_cmd.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines.insert(1, f"# {marker}\n")
+    staged_cmd.write_text("".join(lines), encoding="utf-8")
+    staged_cmd.chmod(0o755)
+    if shutil.which("xattr"):  # macOS only: clear quarantine before installation
+        subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(staged_app), str(staged_cmd)],
                        capture_output=True)
+    backups, installed = [], []
+    try:
+        for staged, target in ((staged_app, dest), (staged_cmd, cmd)):
+            if target.exists():
+                backup = dest_dir / f"{target.name}.backup-{stage.name.removeprefix('.crew-stage-')}"
+                target.rename(backup)
+                backups.append((backup, target))
+            staged.replace(target)
+            installed.append(target)
+    except OSError as err:
+        # Restore the original pair if either atomic rename fails. Preserve staged data.
+        for target in reversed(installed):
+            target.rename(stage / f"failed-{target.name}")
+        for backup, target in reversed(backups):
+            backup.rename(target)
+        raise CrewError(f"shortcut installation failed; previous shortcuts restored: {err}") from err
+    stage.rmdir()
+
     return dest
 
 
