@@ -60,6 +60,7 @@ DEFAULT_IDLE = 60.0       # no recv/watch heartbeat for this long means "not pol
 DEFAULT_SILENT = 600.0    # no poll, send, or live watch for this long: status says "silent"
 WAKE_POLL_SECONDS = 1.0
 WAKE_COMMAND_ENV = "AGENT_BUS_WAKE_COMMAND"
+WAKE_ARGV_ENV = "AGENT_BUS_WAKE_ARGV"
 CONFIG_NAME = ".agent-bus.toml"
 CONFIG_KEYS = ("agent", "harness", "channel", "root")
 HOST = socket.gethostname()
@@ -839,12 +840,17 @@ def _check_hook(ch: Path, what: str, command: str, allow_secret_like: bool) -> N
                 "registered by the operator and never taken from a message body")
 
 
-def register_wake(root: Path, channel: str, agent: str, harness: str, command: str,
+def register_wake(root: Path, channel: str, agent: str, harness: str, command: str | list[str],
                   allow_secret_like: bool = False) -> dict:
     agent = _valid_name("agent", agent)
     harness = _valid_name("harness", harness)
     ch = _channel_dir(root, channel, create=True)
-    _check_hook(ch, "wake", command, allow_secret_like)
+    if isinstance(command, list):
+        if not command or not all(isinstance(a, str) for a in command) or not command[0]:
+            raise BusError("wake argv must include an executable and string arguments")
+        _check_hook(ch, "wake", shlex.join(command), allow_secret_like)
+    else:
+        _check_hook(ch, "wake", command, allow_secret_like)
     record = {"agent": agent, "harness": harness, "command": command,
               "registered_ts": _now_iso(), "last_wake_seq": 0, "last_wake_epoch": 0.0,
               "last_wake_ts": None}
@@ -930,7 +936,12 @@ def _launch_wake_locked(root: Path, channel: str, agent: str, seq: int, force: b
     if force:
         argv.append("--forced")
     env = dict(os.environ)
-    env[WAKE_COMMAND_ENV] = reg["command"]
+    env.pop(WAKE_COMMAND_ENV, None)
+    env.pop(WAKE_ARGV_ENV, None)
+    if isinstance(reg["command"], list):
+        env[WAKE_ARGV_ENV] = json.dumps(reg["command"])
+    else:
+        env[WAKE_COMMAND_ENV] = reg["command"]
     with (_wake_dir(ch) / f"{agent}.out").open("ab") as out:
         proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
                                 stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
@@ -944,7 +955,8 @@ def _launch_wake_locked(root: Path, channel: str, agent: str, seq: int, force: b
 def _supervise(root: Path, channel: str, agent: str, harness: str, seq: int,
                source: str, forced: bool) -> int:
     ch = _channel_dir(root, channel)
-    command = os.environ.get(WAKE_COMMAND_ENV)
+    command = (json.loads(os.environ[WAKE_ARGV_ENV]) if WAKE_ARGV_ENV in os.environ
+               else os.environ.get(WAKE_COMMAND_ENV))
     if not command:
         _wake_log(ch, {"event": "exit", "agent": agent, "seq": seq, "forced": forced,
                        "source": source, "pid": os.getpid(), "exit_code": None,
@@ -954,7 +966,8 @@ def _supervise(root: Path, channel: str, agent: str, harness: str, seq: int,
     env = dict(os.environ, AGENT_BUS_DIR=str(root), AGENT_BUS_CHANNEL=channel,
                AGENT_BUS_AGENT=agent, AGENT_BUS_HARNESS=harness)
     env.pop(WAKE_COMMAND_ENV, None)
-    proc = subprocess.run(command, shell=True, env=env, stdin=subprocess.DEVNULL)
+    env.pop(WAKE_ARGV_ENV, None)
+    proc = subprocess.run(command, shell=isinstance(command, str), env=env, stdin=subprocess.DEVNULL)
     _wake_log(ch, {"event": "exit", "agent": agent, "seq": seq, "forced": forced,
                    "source": source, "pid": os.getpid(), "command": command,
                    "exit_code": proc.returncode})

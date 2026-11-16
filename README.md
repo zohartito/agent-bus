@@ -86,9 +86,11 @@ python3 /path/to/agent-bus/bus.py join -c case-r14 --wake \
   "cd $PWD && claude --resume $CLAUDE_CODE_SESSION_ID --dangerously-skip-permissions -p 'read agent-bus channel case-r14 and continue'"
 ```
 
-`send --json` reports `wake_registered` (which peers can be woken) so the sender knows whether silence means "gone for now" or "never coming back". MCP: `bus_register_wake` and `bus_wake`, plus `wake` on `bus_send` and `keep_wake` on `bus_done`.
+`send --json` reports `wake_registered` (which peers can be woken) so the sender knows whether silence means "gone for now" or "never coming back". MCP: `bus_register_wake` selects an operator-configured hook ID, and `bus_wake` runs a registered hook, plus `wake` on `bus_send` and `keep_wake` on `bus_done`.
 
-Safety: a wake command is a shell string the operator registered; it is never taken from a message body — `join` refuses a command that already appears verbatim in any message on the channel, and the same secret tripwire as `send` applies. A heartbeat only proves polling: an agent that is alive but mid-task for longer than `--idle` without a `recv` will be woken, and what a resume command does to a session that is still open interactively is the harness's problem, not the bus's.
+For MCP, configure `AGENT_BUS_WAKE_HOOKS` in the server environment before startup, for example `{"resume":["codex","exec","resume","<session-id>","read agent-bus channel demo and continue"]}`. `bus_register_wake` takes `hook_id: "resume"` (or `clear: true`), never a command or replacement arguments. The server freezes the allowlist at startup and executes the exact argv without a shell. With no configured hooks, MCP cannot register a wake.
+
+Safety: CLI `join --wake` and `spawn` remain operator shell interfaces. Their verbatim-message and secret checks are accidental-paste tripwires, not a security boundary: whitespace or equivalent shell syntax can evade the message check. Never copy an untrusted message into these commands. A heartbeat only proves polling: an agent that is alive but mid-task for longer than `--idle` without a `recv` will be woken, and what a resume command does to a session that is still open interactively is the harness's problem, not the bus's.
 
 ## Spawn a peer
 
@@ -112,7 +114,7 @@ python3 bus.py join -c case-r14 --as zohar --harness human \
   --notify "python3 /path/to/agent-bus/examples/notify-telegram.py"
 ```
 
-An agent asks with `send --kind question --for zohar --body "Fillet 2 or 3 mm?"`. Any message `--for zohar` runs the hook detached, with `AGENT_BUS_MSG_SEQ/ID/FROM/KIND/BODY` and `AGENT_BUS_AGENT=zohar` in its env; launches go to `notify/log.jsonl`, output to `notify/zohar.out`. [`examples/notify-telegram.py`](examples/notify-telegram.py) forwards it to Telegram (credentials from `~/.config/printer-telegram/telegram.env`, never on the bus; `--dry-run` prints instead) and ends with the exact command that posts the answer back as a normal message: `bus.py send --as zohar --harness human --kind answer --body "3 mm"`. Hook commands pass the same checks as wake commands (secret tripwire, never taken from a message body). `join --clear` drops both hooks.
+An agent asks with `send --kind question --for zohar --body "Fillet 2 or 3 mm?"`. Any message `--for zohar` runs the hook detached, with `AGENT_BUS_MSG_SEQ/ID/FROM/KIND/BODY` and `AGENT_BUS_AGENT=zohar` in its env; launches go to `notify/log.jsonl`, output to `notify/zohar.out`. [`examples/notify-telegram.py`](examples/notify-telegram.py) forwards it to Telegram (credentials from `~/.config/printer-telegram/telegram.env`, never on the bus; `--dry-run` prints instead) and ends with the exact command that posts the answer back as a normal message: `bus.py send --as zohar --harness human --kind answer --body "3 mm"`. CLI notify hooks use the same accidental-paste tripwires as CLI wake commands; the operator must supply a trusted command. `join --clear` drops both hooks.
 
 ## Join a channel
 

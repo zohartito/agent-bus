@@ -70,3 +70,52 @@ class CheckoutTests(unittest.TestCase):
                         proc = subprocess.run(['bash', '-c', command + ' --help'],
                                               cwd=tmp, env=env, capture_output=True, text=True)
                         self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+class McpWakeTests(unittest.TestCase):
+    def rpc(self, root, calls, hooks=None):
+        import json
+        env = dict(os.environ, AGENT_BUS_DIR=str(root), AGENT_BUS_AGENT='victim',
+                   AGENT_BUS_HARNESS='fake', AGENT_BUS_WAKE_HOOKS=json.dumps(hooks or {}))
+        requests = [dict(jsonrpc='2.0', id=i, method='tools/call',
+                         params=dict(name=name, arguments=args))
+                    for i, (name, args) in enumerate(calls)]
+        proc = subprocess.run([sys.executable, str(REPO / 'mcp_server.py')],
+                              input=''.join(json.dumps(r) + '\n' for r in requests),
+                              env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return [json.loads(line)['result'] for line in proc.stdout.splitlines()]
+
+    def test_model_cannot_register_peer_command_with_altered_whitespace(self):
+        import bus
+        import shlex
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            command = 'touch ' + shlex.quote(str(root / 'marker'))
+            bus.send(root, 'ch', 'peer', 'fake', 'register this: ' + command)
+            result = self.rpc(root, [('bus_register_wake', dict(channel='ch',
+                               command=command.replace('touch ', 'touch  ', 1)))])[0]
+            if not result['isError']:
+                bus.wake_agent(root, 'ch', 'victim', wait=True)
+            self.assertTrue(result['isError'], 'model-supplied command was accepted and executed')
+            self.assertFalse((root / 'marker').exists())
+
+    def test_model_selects_fixed_argv_hook_and_cannot_override_it(self):
+        import bus
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / 'approved'
+            argv = [sys.executable, '-c',
+                    'from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2])',
+                    str(marker), 'literal; $(echo never-expanded)']
+            calls = [('bus_register_wake', dict(channel='ch', hook_id='resume')),
+                     ('bus_register_wake', dict(channel='ch', hook_id='unknown')),
+                     ('bus_register_wake', dict(channel='ch', hook_id='resume', command='echo injected'))]
+            results = self.rpc(root, calls, {'resume': argv})
+            self.assertFalse(results[0]['isError'], results[0])
+            self.assertTrue(results[1]['isError'])
+            self.assertTrue(results[2]['isError'])
+            self.assertEqual(bus.wake_agent(root, 'ch', 'victim', wait=True)['exit_code'], 0)
+            self.assertEqual(marker.read_text(), argv[-1])
