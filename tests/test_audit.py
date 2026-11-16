@@ -178,3 +178,17 @@ except bus.BusError:
                 bus.watch_wake(root)
             self.assertTrue((root / 'watch-wake.pid').exists())
             self.assertEqual((root / 'watch-wake.pid').read_text(), 'other-owner\n')
+
+
+class DoneDocumentationTests(unittest.TestCase):
+    def test_documented_done_protocol_command_is_accepted(self):
+        import shlex
+        import tempfile
+        line = next(line for line in (REPO / 'README.md').read_text().splitlines()
+                    if line.startswith('- **DONE**:'))
+        command = line.split('`')[1].replace('<PASS|FAIL>', 'PASS')
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = subprocess.run([sys.executable, str(REPO / 'bus.py'),
+                                   *shlex.split(command), '--root', tmp, '--as', 'a', '--harness', 'fake'],
+                                  cwd=tmp, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
