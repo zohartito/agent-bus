@@ -648,6 +648,58 @@ class RefTests(BusCase):
             bus.verify_refs(self.root, "ch", 1)  # nothing was sent
 
 
+class AuditTests(BusCase):
+    def snapshot(self):
+        return {p: (p.stat().st_mtime_ns, p.read_bytes())
+                for p in self.root.rglob("*") if p.is_file()}
+
+    def kinds(self, report):
+        return sorted(((v["seq"], v["kind"]) for v in report["violations"]),
+                      key=lambda pair: (pair[0] or 0, pair[1]))
+
+    def test_a_clean_concurrent_channel_passes_and_the_audit_writes_nothing(self):
+        threads = [threading.Thread(target=lambda n=n: [self.send(f"agent{n}", f"m{i}")
+                                                        for i in range(15)])
+                   for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        bus.post_done(self.root, "ch", "agent0", "agent0-harness", "PASS", "ok")
+        before = self.snapshot()
+        report = bus.audit_channel(self.root, "ch")
+        self.assertEqual((report["ok"], report["last_seq"], report["violations"]), (True, 61, []))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_hole_reports_missing_and_orphaned_seqs_and_status_shows_them(self):
+        for i in range(4):
+            self.send("alpha", f"m{i}")
+        (self.root / "ch" / "messages" / "00000002.json").unlink()
+        report = bus.audit_channel(self.root, "ch")
+        self.assertFalse(report["ok"])
+        self.assertEqual(self.kinds(report), [(2, "missing"), (3, "orphaned"), (4, "orphaned")])
+        st = bus.status(self.root, "ch")
+        self.assertEqual((st["message_count"], st["unreachable_seqs"]), (1, [3, 4]))
+
+    def test_corrupt_mismatched_and_two_harness_records_are_each_named_by_seq(self):
+        for i in range(4):
+            self.send("alpha", f"m{i}")
+        msgs = self.root / "ch" / "messages"
+        (msgs / "00000002.json").write_text("{not json", encoding="utf-8")
+        rec = json.loads((msgs / "00000003.json").read_text(encoding="utf-8"))
+        (msgs / "00000003.json").write_text(json.dumps(dict(rec, seq=9, id="ch:00000009")),
+                                            encoding="utf-8")
+        rec = json.loads((msgs / "00000004.json").read_text(encoding="utf-8"))
+        (msgs / "00000004.json").write_text(json.dumps(dict(rec, harness="other")),
+                                            encoding="utf-8")
+        (self.root / "ch" / "done" / "ghost.json").write_text(
+            json.dumps({"agent": "ghost", "harness": "h"}), encoding="utf-8")
+        report = bus.audit_channel(self.root, "ch")
+        self.assertEqual(self.kinds(report),
+                         [(None, "done_without_post"), (2, "unparseable"), (3, "id_mismatch"),
+                          (3, "seq_mismatch"), (4, "harness_mismatch")])
+
+
 class KindTests(BusCase):
     def test_kinds_and_filtered_views_never_move_the_cursor(self):
         self.send("alpha", "the plan", kind="plan")
@@ -882,6 +934,19 @@ class CliFeatureTests(unittest.TestCase):
             part.write_bytes(b"v2")
             out = self.run_cli(env, "verify-refs", "-c", "t", "1")
             self.assertEqual((out.returncode, json.loads(out.stdout)[0]["status"]), (1, "changed"))
+
+    def test_verify_channel_exit_codes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, AGENT_BUS_DIR=tmp,
+                       AGENT_BUS_AGENT="alpha", AGENT_BUS_HARNESS="h1")
+            for body in ("one", "two"):
+                self.run_cli(env, "send", "-c", "t", "--body", body)
+            out = self.run_cli(env, "verify-channel", "-c", "t")
+            self.assertEqual((out.returncode, json.loads(out.stdout)["ok"]), (0, True), out.stderr)
+            (Path(tmp) / "t" / "messages" / "00000001.json").unlink()
+            out = self.run_cli(env, "verify-channel", "-c", "t")
+            self.assertEqual((out.returncode, json.loads(out.stdout)["violations"][0]["kind"]),
+                             (1, "missing"))
 
     def test_config_file_supplies_identity_and_flags_and_env_override_it(self):
         with tempfile.TemporaryDirectory() as tmp:

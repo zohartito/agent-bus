@@ -18,7 +18,7 @@ A small local channel: send, recv (own messages hidden, de-duped), optional watc
 
 Keep it tiny. Protocol and tests before a desktop app. MCP stdio + a CLI are the product surface. Do not add a hosted service in v0. Do not modify `bus.py` / `mcp_server.py` for crew launcher features; `spawn` (one detached peer plus its wake) is the only launcher verb in `bus.py`.
 
-- `bus.py` — core + CLI: send / recv / watch / done / status / channels / verify-refs / join / wake / spawn / watch-wake; identity from `--as`, env, or `.agent-bus.toml`
+- `bus.py` — core + CLI: send / recv / watch / done / status / channels / verify-refs / verify-channel / join / wake / spawn / watch-wake; identity from `--as`, env, or `.agent-bus.toml`
 - `mcp_server.py` — stdio MCP over the same core: bus_send, bus_recv, bus_done, bus_status, bus_channels, bus_register_wake, bus_wake, bus_verify_refs
 - `crew.py` — tmux crew: `desk` is the clickable window; `up` still launches every seat at once
 - `Crew.app` — double-clickable starter; `python3 crew.py shortcut` puts it on the Desktop
