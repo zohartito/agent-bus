@@ -422,6 +422,53 @@ def verify_refs(root: Path, channel: str, seq: int) -> list[dict]:
     return out
 
 
+def audit_channel(root: Path, channel: str) -> dict:
+    """Read-only, lock-free check of one channel's transcript: seq holes, files
+    whose seq or id disagree with their name, unparseable files, an agent under
+    two harnesses, and done records from agents that never posted."""
+    ch = _channel_dir(root, channel)
+    msgs_dir = ch / "messages"
+    seqs = _existing_seqs(msgs_dir)
+    last = seqs[-1] if seqs else 0
+    violations: list[dict] = []
+
+    def flag(seq: int | None, kind: str, detail: str) -> None:
+        violations.append({"seq": seq, "kind": kind, "detail": detail})
+
+    missing = sorted(set(range(1, last + 1)) - set(seqs))
+    for seq in missing:
+        flag(seq, "missing", "no message file; recv and status stop before it")
+    harness_of: dict[str, tuple[str, int]] = {}
+    for seq in seqs:
+        if missing and seq > missing[0]:
+            flag(seq, "orphaned", f"after the hole at {missing[0]}; no reader reaches it")
+        rec = _read_json(_message_path(msgs_dir, seq))
+        if not isinstance(rec, dict):
+            flag(seq, "unparseable", "not a JSON object")
+            continue
+        if rec.get("seq") != seq:
+            flag(seq, "seq_mismatch", f"record says seq {rec.get('seq')!r}")
+        want = f"{channel}:{seq:0{SEQ_WIDTH}d}"
+        if rec.get("id") != want:
+            flag(seq, "id_mismatch", f"id {rec.get('id')!r}, expected {want!r}")
+        if not isinstance(rec.get("ts"), str) or _age_of(rec["ts"]) is None:
+            flag(seq, "bad_ts", f"ts {rec.get('ts')!r} does not parse")
+        agent, harness = rec.get("agent"), rec.get("harness")
+        if not isinstance(agent, str):
+            flag(seq, "bad_agent", f"agent {agent!r}")
+            continue
+        first = harness_of.setdefault(agent, (harness, seq))
+        if first[0] != harness:
+            flag(seq, "harness_mismatch",
+                 f"agent {agent!r} as {harness!r}; seq {first[1]} was {first[0]!r}")
+    for path in sorted((ch / "done").glob("*.json")) if (ch / "done").is_dir() else ():
+        rec = _read_json(path)
+        if not isinstance(rec, dict) or rec.get("agent") not in harness_of:
+            who = rec.get("agent") if isinstance(rec, dict) else None
+            flag(None, "done_without_post", f"done/{path.name} names {who!r}, who never posted")
+    return {"channel": channel, "ok": not violations, "last_seq": last, "violations": violations}
+
+
 def send(root: Path, channel: str, agent: str, harness: str, body: str,
          kind: str = "message", allow_secret_like: bool = False,
          wake: bool = False, cooldown: float = DEFAULT_COOLDOWN,
@@ -725,6 +772,7 @@ def _phases(ch: Path, signers: list[dict]) -> dict:
 
 def status(root: Path, channel: str, silent_after: float = DEFAULT_SILENT) -> dict:
     ch = _channel_dir(root, channel)
+    listed = _existing_seqs(ch / "messages")  # before the read: a send in between is no hole
     msgs = _read_after(ch, 0)
     agents: dict[str, dict] = {}
 
@@ -773,6 +821,8 @@ def status(root: Path, channel: str, silent_after: float = DEFAULT_SILENT) -> di
         "message_count": len(msgs),
         **limits,
         "last_seq": msgs[-1]["seq"] if msgs else 0,
+        # On disk past a seq hole, so not in the counts above; see verify-channel.
+        "unreachable_seqs": [s for s in listed if s > len(msgs)],
         "participants": participants,
         "readers": readers,
         "complete": complete,
@@ -1421,6 +1471,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("verify-refs", parents=[common],
                        help="which files a message pinned with --ref changed since; exit 1 if any")
     p.add_argument("seq", type=int)
+    sub.add_parser("verify-channel", parents=[common],
+                   help="read-only transcript audit: seq holes, bad files, identity; exit 1 if any")
 
     p = sub.add_parser("join", parents=[common],
                        help="register the shell command that resumes YOUR session on this channel")
@@ -1530,6 +1582,10 @@ def main(argv: list[str] | None = None) -> int:
             result = verify_refs(root, args.channel, args.seq)
             print(json.dumps(result, indent=2))
             return 0 if all(r["status"] == "unchanged" for r in result) else 1
+        elif args.command == "verify-channel":
+            result = audit_channel(root, args.channel)
+            print(json.dumps(result, indent=2))
+            return 0 if result["ok"] else 1
         elif args.command == "join":
             if args.clear:
                 agent, _ = _identity(args, cfg, need_harness=False)
