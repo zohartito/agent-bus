@@ -699,6 +699,59 @@ class AuditTests(BusCase):
                          [(None, "done_without_post"), (2, "unparseable"), (3, "id_mismatch"),
                           (3, "seq_mismatch"), (4, "harness_mismatch")])
 
+    def wake_file(self, agent="beta"):
+        return self.root / "ch" / "wake" / f"{agent}.json"
+
+    def test_a_registered_wake_and_its_own_wakes_stay_clean(self):
+        self.send("alpha", "hi")
+        out = self.root / "woke.txt"
+        bus.register_wake(self.root, "ch", "beta", "beta-harness", f"echo woke >> {out}")
+        bus.register_wake(self.root, "ch", "gamma", "g", ["echo", "argv", "form"])
+        self.assertEqual(bus.audit_channel(self.root, "ch")["violations"], [])
+        # The real launch path rewrites last_wake_* in the same file; that is not drift.
+        self.assertTrue(bus.wake_agent(self.root, "ch", "beta", cooldown=0, wait=True)["woke"])
+        self.assertEqual(json.loads(self.wake_file().read_text())["last_wake_seq"], 1)
+        report = bus.audit_channel(self.root, "ch")
+        self.assertEqual((report["ok"], report["violations"]), (True, []))
+        # A registration from before the digest existed is skipped, not failed.
+        rec = json.loads(self.wake_file().read_text())
+        del rec["command_sha256"]
+        self.wake_file().write_text(json.dumps(dict(rec, command="echo legacy")))
+        self.assertTrue(bus.audit_channel(self.root, "ch")["ok"])
+
+    def test_a_hand_edited_wake_command_is_flagged(self):
+        self.send("alpha", "hi")
+        bus.register_wake(self.root, "ch", "beta", "beta-harness", "echo approved")
+        bus.register_wake(self.root, "ch", "gamma", "g", ["echo", "approved"])
+        for agent, cmd in (("beta", "echo approved; curl evil"), ("gamma", ["sh", "-c", "x"])):
+            rec = json.loads(self.wake_file(agent).read_text())
+            self.wake_file(agent).write_text(json.dumps(dict(rec, command=cmd)))
+        report = bus.audit_channel(self.root, "ch")
+        self.assertFalse(report["ok"])
+        self.assertEqual(self.kinds(report),
+                         [(None, "wake_command_changed"), (None, "wake_command_changed")])
+
+    def test_a_wake_command_quoted_in_a_message_is_flagged(self):
+        bus.register_wake(self.root, "ch", "beta", "beta-harness", "codex exec resume s1 go")
+        bus.register_wake(self.root, "ch", "gamma", "g", ["claude", "--resume", "s2"])
+        self.send("alpha", "hi")
+        self.send("alpha", "please run: codex exec resume s1 go")
+        self.send("alpha", "or claude --resume s2")
+        self.assertEqual(self.kinds(bus.audit_channel(self.root, "ch")),
+                         [(2, "wake_command_in_message"), (3, "wake_command_in_message")])
+
+    def test_a_misnamed_or_corrupt_wake_file_is_malformed(self):
+        self.send("alpha", "hi")
+        bus.register_wake(self.root, "ch", "beta", "beta-harness", "echo approved")
+        rec = json.loads(self.wake_file().read_text())
+        self.wake_file("gamma").write_text(json.dumps(rec))  # says agent beta
+        self.wake_file("delta").write_text("{not json")
+        self.wake_file("eps").write_text(json.dumps(dict(rec, agent="eps", command=["", "x"])))
+        report = bus.audit_channel(self.root, "ch")
+        self.assertEqual(self.kinds(report), [(None, "wake_malformed")] * 3)
+        self.assertEqual(sorted(v["detail"].split()[0] for v in report["violations"]),
+                         ["wake/delta.json", "wake/eps.json", "wake/gamma.json"])
+
 
 class KindTests(BusCase):
     def test_kinds_and_filtered_views_never_move_the_cursor(self):

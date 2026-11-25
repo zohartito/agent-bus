@@ -425,7 +425,9 @@ def verify_refs(root: Path, channel: str, seq: int) -> list[dict]:
 def audit_channel(root: Path, channel: str) -> dict:
     """Read-only, lock-free check of one channel's transcript: seq holes, files
     whose seq or id disagree with their name, unparseable files, an agent under
-    two harnesses, and done records from agents that never posted."""
+    two harnesses, done records from agents that never posted, and wake
+    registrations that are malformed, edited since registration, or quoted in
+    a message body."""
     ch = _channel_dir(root, channel)
     msgs_dir = ch / "messages"
     seqs = _existing_seqs(msgs_dir)
@@ -439,6 +441,7 @@ def audit_channel(root: Path, channel: str) -> dict:
     for seq in missing:
         flag(seq, "missing", "no message file; recv and status stop before it")
     harness_of: dict[str, tuple[str, int]] = {}
+    bodies: list[tuple[int, object]] = []
     for seq in seqs:
         if missing and seq > missing[0]:
             flag(seq, "orphaned", f"after the hole at {missing[0]}; no reader reaches it")
@@ -446,6 +449,7 @@ def audit_channel(root: Path, channel: str) -> dict:
         if not isinstance(rec, dict):
             flag(seq, "unparseable", "not a JSON object")
             continue
+        bodies.append((seq, rec.get("body")))
         if rec.get("seq") != seq:
             flag(seq, "seq_mismatch", f"record says seq {rec.get('seq')!r}")
         want = f"{channel}:{seq:0{SEQ_WIDTH}d}"
@@ -466,6 +470,27 @@ def audit_channel(root: Path, channel: str) -> dict:
         if not isinstance(rec, dict) or rec.get("agent") not in harness_of:
             who = rec.get("agent") if isinstance(rec, dict) else None
             flag(None, "done_without_post", f"done/{path.name} names {who!r}, who never posted")
+    # Wake registrations are state the bus executes: one edited by hand (or by an
+    # agent) since `register_wake` stored its digest is drift, not a registration.
+    for path in sorted((ch / "wake").glob("*.json")) if (ch / "wake").is_dir() else ():
+        rec = _read_json(path)
+        cmd = rec.get("command") if isinstance(rec, dict) else None
+        if not (isinstance(rec, dict) and rec.get("agent") == path.stem
+                and ((isinstance(cmd, str) and cmd.strip()) or
+                     (isinstance(cmd, list) and cmd and all(isinstance(a, str) for a in cmd)
+                      and cmd[0]))):
+            flag(None, "wake_malformed", f"wake/{path.name} is not a registration for "
+                 f"{path.stem!r}")
+            continue
+        want = rec.get("command_sha256")
+        if want is not None and want != _command_digest(cmd):  # no digest: an older registration
+            flag(None, "wake_command_changed",
+                 f"wake/{path.name} command no longer matches its registered sha256")
+        needle = shlex.join(cmd) if isinstance(cmd, list) else cmd
+        hit = next((seq for seq, body in bodies if _hook_in_body(needle, body)), None)
+        if hit is not None:
+            flag(hit, "wake_command_in_message",
+                 f"wake/{path.name} command appears verbatim in message {hit}")
     return {"channel": channel, "ok": not violations, "last_seq": last, "violations": violations}
 
 
@@ -871,6 +896,17 @@ def _wake_log(ch: Path, entry: dict) -> None:
         fh.write(json.dumps(dict(ts=_now_iso(), **entry)) + "\n")
 
 
+def _command_digest(command: str | list[str]) -> str:
+    """sha256 of the command's canonical JSON, stored at registration so an audit
+    can tell a hand-edited wake/<agent>.json from the one the operator registered."""
+    canon = json.dumps(command, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def _hook_in_body(command: str, body) -> bool:
+    return isinstance(body, str) and command.strip() in body
+
+
 def _check_hook(ch: Path, what: str, command: str, allow_secret_like: bool) -> None:
     if not command or not command.strip():
         raise BusError(f"{what} command is empty")
@@ -882,9 +918,8 @@ def _check_hook(ch: Path, what: str, command: str, allow_secret_like: bool) -> N
                 "harness's own config, not in the command. False positive: --allow-secret-like.")
     # The command is the operator's, never a peer's: refuse anything that
     # already appears in a message body on this channel.
-    needle = command.strip()
     for m in _read_after(ch, 0):
-        if needle in m["body"]:
+        if _hook_in_body(command, m["body"]):
             raise BusError(
                 f"{what} command appears verbatim in message {m['id']}; {what} commands are "
                 "registered by the operator and never taken from a message body")
@@ -902,6 +937,7 @@ def register_wake(root: Path, channel: str, agent: str, harness: str, command: s
     else:
         _check_hook(ch, "wake", command, allow_secret_like)
     record = {"agent": agent, "harness": harness, "command": command,
+              "command_sha256": _command_digest(command),
               "registered_ts": _now_iso(), "last_wake_seq": 0, "last_wake_epoch": 0.0,
               "last_wake_ts": None}
     _write_json(ch, _wake_path(ch, agent), record)
