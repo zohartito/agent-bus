@@ -6,7 +6,7 @@ This is Zohar's (`github.com/zohartito/agent-bus`). It is not BridgeMind.
 
 v0 is a local file mailbox: one directory per channel under `~/.agent-bus`, one JSON file per message, monotonic gapless ids claimed with an atomic hard link. Stdlib Python only — no dependencies, no daemon, no hosted service. The product surface is a CLI (`bus.py`) and a stdio MCP server (`mcp_server.py`) over the same core. The original build spec is [`GOAL.md`](GOAL.md).
 
-Install: clone this repository. It needs only Python 3 (standard library), so there is nothing else to install. Run `python3 bus.py` from the checkout as shown below; replace `/path/to/agent-bus` in the examples with your checkout's path.
+Install: clone this repository on a POSIX system (macOS or Linux; secure mailbox access requires no-follow directory operations). It needs only Python 3.11 or newer (standard library), so there is nothing else to install. Run `python3 bus.py` from the checkout as shown below; replace `/path/to/agent-bus` in the examples with your checkout's path.
 
 ## Quick start: you direct, `spawn` starts the peer
 
@@ -20,13 +20,15 @@ channel = "case-r14"
 ```
 
 ```bash
-BUS="python3 $HOME/projects/agent-bus/bus.py"
-$BUS send --kind plan --body "Plan: you model the lid, I review. Your move."
-$BUS spawn --agent codex -- codex exec -m gpt-6-astra -c 'model_reasoning_effort="high"' \
+# Run this setup from the repository checkout.
+export AGENT_BUS_CHECKOUT="$PWD"
+BUS() { python3 "$AGENT_BUS_CHECKOUT/bus.py" "$@"; }
+BUS send --kind plan --body "Plan: you model the lid, I review. Your move."
+BUS spawn --agent codex -- codex exec -m gpt-6-astra -c 'model_reasoning_effort="high"' \
     --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$(cat peer-prompt.md)"
-$BUS watch --body-only    # blocks until codex posts; prints just the new bodies
-$BUS status               # who is watching, who went silent, is the peer process alive
-$BUS done --verdict PASS --summary "lid modelled and reviewed"
+BUS watch --body-only    # blocks until codex posts; prints just the new bodies
+BUS status               # who is watching, who went silent, is the peer process alive
+BUS done --verdict PASS --summary "lid modelled and reviewed"
 ```
 
 `peer-prompt.md` is the peer's standing instruction — see [`TRY.md`](TRY.md) for a complete one. `spawn` starts the peer in its own session (it survives your shell), puts `AGENT_BUS_AGENT/HARNESS/CHANNEL/DIR` in its env so its bus calls need no flags, reads its session id, and registers the matching resume as its wake — see [Spawn a peer](#spawn-a-peer).
@@ -43,7 +45,7 @@ Without a config file, `--as NAME --harness H` or the env vars work the same; pr
 - **Ids**: a sender claims `max+1` by hard-linking a fully written temp file to `messages/<seq>.json`; `EEXIST` means retry. Ids are monotonic and gapless, and a reader that sees seq N can already see everything below N.
 - **Audit**: `verify-channel` is a read-only, lock-free check of the transcript: missing seqs and the orphaned ones past a hole, files whose `seq`/`id` disagree with their name, a bad `ts`, unparseable files, an agent under two harnesses, `done/` records from an agent that never posted. Each violation is `{seq, kind, detail}`; exit 1 if there is any. `status` lists seqs stranded past a hole as `unreachable_seqs`.
 - **Cursor**: `cursors/<agent>.json` per reader. Fetch-and-ack is one step; `peek`/`after` are the escape hatches.
-- **DONE**: `done <PASS|FAIL> --summary "..."` writes `done/<agent>.json` *and* posts a `done`-kind message so the peer's next `recv` sees it. All participants done ⇒ `VERDICT.json` (overall `FAIL` if anyone failed). A participant is anyone who has posted; every one of them must post a verdict before the channel is complete — a read-only observer never blocks, an agent that spoke and went silent does. That is deliberate: both sides must agree the job is done. A person (`--harness human`) is consulted, not a signatory: a human who answered a question never blocks `VERDICT.json`, but a human `done --verdict FAIL` still makes it `FAIL`.
+- **DONE**: `done --verdict <PASS|FAIL> --summary "..."` writes `done/<agent>.json` *and* posts a `done`-kind message so the peer's next `recv` sees it. All participants done ⇒ `VERDICT.json` (overall `FAIL` if anyone failed). A participant is anyone who has posted; every one of them must post a verdict before the channel is complete — a read-only observer never blocks, an agent that spoke and went silent does. That is deliberate: both sides must agree the job is done. A person (`--harness human`) is consulted, not a signatory: a human who answered a question never blocks `VERDICT.json`, but a human `done --verdict FAIL` still makes it `FAIL`.
 - **Phases**: `done --phase A --verdict PASS --summary "..."` posts a `phase`-kind message (with `phase` and `verdict` fields), records `phases/A/<agent>.json`, and leaves the channel open. `status.phases.A` lists the verdicts and turns `complete` when every non-human participant has one.
 - **Liveness**: `status` gives each participant — and each of `readers` (polled or spawned, never posted) — `heartbeat_age_s`, `watching`/`watch_pid` (a live `watch` holds the lock right now), `silent` (no poll, send, or live watch for `--silent-after` minutes, default 10), and for a spawned peer `spawn_pid`/`spawn_alive`. Silent and alive is busy; silent and dead is crashed.
 - **One reader per agent**: every read that acks holds an OS lock (`flock`) on `watchers/<agent>.lock`, with the holder's pid, host, and start time in `watchers/<agent>.json`. While a `watch` (or `recv --wait`, or MCP `bus_recv` with `wait`) holds it, any other acking `recv`/`watch` for that agent waits up to 1 s and is then refused, because a stray watcher would silently ack the next message; `--peek`, `--after`, and `--kind` still work. `--force` (with or without `--wait`) asks the holder to let go via `watchers/<agent>.stop`: the holder stops at its next poll without acking, and the forcing read proceeds (or errors after 5 s if the holder never polls). The kernel drops the lock when the holder exits, even on SIGKILL, so there are no stale locks; SIGTERM and SIGHUP also clear the info file. POSIX only: without `fcntl` (Windows) there is no lock.
@@ -60,6 +62,8 @@ Without a config file, `--as NAME --harness H` or the env vars work the same; pr
 - **Tripwire**: `send` refuses bodies that look like credentials (AWS/GitHub/Slack/`sk-` keys, private key blocks, JWTs). `--allow-secret-like` overrides a false positive. Secrets never go on the bus; the bus carries messages and file paths, not publishes.
 - **Wake**: a message is only seen on the next `recv`, so a participant whose session has ended never hears it. `join --wake "<command>"` registers, per agent per channel, the shell command that resumes *that agent's own* session (`wake/<agent>.json`, with harness and registration time). The `watch-wake` daemon runs it when a message from someone else lands past that agent's cursor and the agent is not polling — every `recv`/`watch` touches `heartbeats/<agent>`, and a heartbeat younger than `--idle` (60 s) means "leave me alone". One wake per message, at most one per `--cooldown` (120 s) per agent, so a chatty peer cannot spawn sessions in a loop. `send --wake` forces it regardless of the heartbeat (the cooldown still holds). `done` clears your registration unless `--keep-wake`. Every wake is logged to `wake/log.jsonl` with the triggering seq and the command's exit code; the resumed harness's output lands in `wake/<agent>.out`. The wake command runs with `AGENT_BUS_AGENT`/`HARNESS`/`CHANNEL`/`DIR` set to the *woken* agent, whoever triggered it.
 
+Mailbox storage rejects symlinks at the configured root and below it. Operations use directory descriptors so replacing a checked path with a symlink cannot redirect file access. Ancestors outside the configured root are trusted. Directories are created as 0700 and files as 0600; access validates ownership and tightens existing owned entries to those modes. Entries owned by another user are refused. Permission checks also apply during reads.
+
 Env vars: `AGENT_BUS_DIR` (root, default `~/.agent-bus`), `AGENT_BUS_AGENT`, `AGENT_BUS_HARNESS`, `AGENT_BUS_CHANNEL` (default `main`); each also has a flag (`--root`, `--as`, `--harness`, `-c`) and an `.agent-bus.toml` key (`root`, `agent`, `harness`, `channel`). Point `AGENT_BUS_DIR` at a synced folder and the same protocol crosses machines; that stays out of scope for v0.
 
 ## Wake a stopped peer
@@ -69,7 +73,7 @@ Env vars: `AGENT_BUS_DIR` (root, default `~/.agent-bus`), `AGENT_BUS_AGENT`, `AG
 python3 bus.py join -c demo --wake 'codex exec resume 019a-... "read agent-bus channel demo and continue"'
 python3 bus.py join -c demo --wake 'claude --resume 7f3c-... -p "read agent-bus channel demo and continue"'
 
-# one daemon per machine (a pid file under the root refuses a second one):
+# one daemon per machine (a POSIX lifetime lock under the root refuses a second one):
 python3 bus.py watch-wake                  # --cooldown 120 --idle 60 --poll 1
 python3 bus.py watch-wake --once           # one sweep, wait for the wakes, exit (cron-friendly)
 
@@ -85,9 +89,11 @@ python3 /path/to/agent-bus/bus.py join -c case-r14 --wake \
   "cd $PWD && claude --resume $CLAUDE_CODE_SESSION_ID --dangerously-skip-permissions -p 'read agent-bus channel case-r14 and continue'"
 ```
 
-`send --json` reports `wake_registered` (which peers can be woken) so the sender knows whether silence means "gone for now" or "never coming back". MCP: `bus_register_wake` and `bus_wake`, plus `wake` on `bus_send` and `keep_wake` on `bus_done`.
+`send --json` reports `wake_registered` (which peers can be woken) so the sender knows whether silence means "gone for now" or "never coming back". MCP: `bus_register_wake` selects an operator-configured hook ID, and `bus_wake` runs a registered hook, plus `wake` on `bus_send` and `keep_wake` on `bus_done`.
 
-Safety: a wake command is a shell string the operator registered; it is never taken from a message body — `join` refuses a command that already appears verbatim in any message on the channel, and the same secret tripwire as `send` applies. A heartbeat only proves polling: an agent that is alive but mid-task for longer than `--idle` without a `recv` will be woken, and what a resume command does to a session that is still open interactively is the harness's problem, not the bus's.
+For MCP, configure `AGENT_BUS_WAKE_HOOKS` in the server environment before startup, for example `{"resume":["codex","exec","resume","<session-id>","read agent-bus channel demo and continue"]}`. `bus_register_wake` takes `hook_id: "resume"` (or `clear: true`), never a command or replacement arguments. The server freezes the allowlist at startup and executes the exact argv without a shell. With no configured hooks, MCP cannot register a wake.
+
+Safety: CLI `join --wake` and `spawn` remain operator shell interfaces. Their verbatim-message and secret checks are accidental-paste tripwires, not a security boundary: whitespace or equivalent shell syntax can evade the message check. Never copy an untrusted message into these commands. A heartbeat only proves polling: an agent that is alive but mid-task for longer than `--idle` without a `recv` will be woken, and what a resume command does to a session that is still open interactively is the harness's problem, not the bus's.
 
 ## Spawn a peer
 
@@ -111,7 +117,7 @@ python3 bus.py join -c case-r14 --as zohar --harness human \
   --notify "python3 /path/to/agent-bus/examples/notify-telegram.py"
 ```
 
-An agent asks with `send --kind question --for zohar --body "Fillet 2 or 3 mm?"`. Any message `--for zohar` runs the hook detached, with `AGENT_BUS_MSG_SEQ/ID/FROM/KIND/BODY` and `AGENT_BUS_AGENT=zohar` in its env; launches go to `notify/log.jsonl`, output to `notify/zohar.out`. [`examples/notify-telegram.py`](examples/notify-telegram.py) forwards it to Telegram (credentials from `~/.config/printer-telegram/telegram.env`, never on the bus; `--dry-run` prints instead) and ends with the exact command that posts the answer back as a normal message: `bus.py send --as zohar --harness human --kind answer --body "3 mm"`. Hook commands pass the same checks as wake commands (secret tripwire, never taken from a message body). `join --clear` drops both hooks.
+An agent asks with `send --kind question --for zohar --body "Fillet 2 or 3 mm?"`. Any message `--for zohar` runs the hook detached, with `AGENT_BUS_MSG_SEQ/ID/FROM/KIND/BODY` and `AGENT_BUS_AGENT=zohar` in its env; launches go to `notify/log.jsonl`, output to `notify/zohar.out`. [`examples/notify-telegram.py`](examples/notify-telegram.py) forwards it to Telegram (credentials from `~/.config/printer-telegram/telegram.env`, never on the bus; `--dry-run` prints instead) and ends with the exact command that posts the answer back as a normal message: `bus.py send --as zohar --harness human --kind answer --body "3 mm"`. CLI notify hooks use the same accidental-paste tripwires as CLI wake commands; the operator must supply a trusted command. `join --clear` drops both hooks.
 
 ## Join a channel
 
@@ -147,9 +153,11 @@ cursor-agent (`~/.cursor/mcp.json`) and Gemini CLI (`~/.gemini/settings.json`), 
 
 ## Crew (the window you click)
 
-This is for you, not for an agent. **Normal use requires no typing:** double-click **Crew** on the Desktop, then use the mouse. A window opens with four empty seats and a compact control dock: Orch, Scout, Claude, Codex.
+Prerequisites: Python 3.11+, tmux 3.2+ on PATH, and the harness CLIs you intend to load. On macOS, run `python3 crew.py shortcut` once from the checkout to install **Crew.app** and **Crew.command** on the Desktop. The shipped configs resolve their working directory relative to the checkout. Shortcut installation refuses unrelated or unmarked `Crew.app` / `Crew.command` collisions (move older unmarked installs aside first). Replacing a managed install stages both launchers first and retains `Crew.*.backup-*` copies; an installation failure restores the previous pair.
 
-Each row has **Load**, provider, effort, and (workers only) **Remove**. **+ Custom** walks through name → provider → effort. **Load all** opens every agent and deliberately sends no prompt, task, or mailbox message. Loading and briefing are separate human decisions. The dock says whether anyone has actually spoken. **Shut down** closes Crew. Opening Crew again moves the one live workspace to the new window instead of making competing copies.
+This is for you, not for an agent. **After that setup, normal use requires no typing:** double-click **Crew** on the Desktop, then use the mouse. A window opens with four empty seats and a compact control dock: Orch, Scout, Claude, Codex.
+
+Each row has **Load** and provider controls, plus **Remove** for workers. Claude and cursor-agent rows also have an effort control; Codex rows do not. **+ Custom** walks through name → provider → effort. **Load all** opens every agent and deliberately sends no prompt, task, or mailbox message. Loading and briefing are separate human decisions. The dock says whether anyone has actually spoken. **Shut down** closes Crew. Opening Crew again moves the one live workspace to the new window instead of making competing copies.
 
 The team is not fixed at four. Use **−1**, **+1**, or **+4** to resize quickly; new seats are balanced across the available providers. Use **+ Custom** when you want to pick the name, provider, and effort yourself. Larger rosters are paged in the dock, and new panes split the largest open seat so the workspace stays balanced.
 

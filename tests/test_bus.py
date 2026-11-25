@@ -989,5 +989,24 @@ class CliFeatureTests(unittest.TestCase):
             self.assertTrue(wait_until(lambda: not bus._pid_alive(rec["pid"])))
 
 
+class PidAliveTests(unittest.TestCase):
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "zombie state is read from Linux /proc")
+    def test_unreaped_exited_process_is_not_alive(self):
+        child = os.fork()
+        if child == 0:
+            os._exit(0)
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:  # wait until the child has exited but is not yet reaped
+                state = Path(f"/proc/{child}/stat").read_text().rsplit(")", 1)[1].split()[0]
+                if state == "Z":
+                    break
+                time.sleep(0.01)
+            os.kill(child, 0)  # a zombie still answers the signal probe
+            self.assertFalse(bus._pid_alive(child))
+        finally:
+            os.waitpid(child, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

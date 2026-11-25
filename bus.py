@@ -30,11 +30,16 @@ import socket
 import subprocess
 import sys
 import time
+if sys.version_info < (3, 11):
+    raise SystemExit("agent-bus requires Python 3.11 or newer; run with python3.11+.")
+
 import tomllib
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+from mailbox_fs import MailboxPath, MailboxError as BusError
 
 try:
     import fcntl
@@ -57,6 +62,7 @@ DEFAULT_IDLE = 60.0       # no recv/watch heartbeat for this long means "not pol
 DEFAULT_SILENT = 600.0    # no poll, send, or live watch for this long: status says "silent"
 WAKE_POLL_SECONDS = 1.0
 WAKE_COMMAND_ENV = "AGENT_BUS_WAKE_COMMAND"
+WAKE_ARGV_ENV = "AGENT_BUS_WAKE_ARGV"
 CONFIG_NAME = ".agent-bus.toml"
 CONFIG_KEYS = ("agent", "harness", "channel", "root")
 HOST = socket.gethostname()
@@ -86,10 +92,6 @@ SECRET_PATTERNS = (
     ("private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.")),
 )
-
-
-class BusError(Exception):
-    """Refused or failed bus operation; the message is safe to show the agent."""
 
 
 class TurnCapError(BusError):
@@ -142,7 +144,7 @@ def _valid_name(what: str, name: str | None) -> str:
 
 
 def _channel_dir(root: Path, channel: str, create: bool = False) -> Path:
-    ch = root / _valid_name("channel", channel)
+    ch = MailboxPath(root) / _valid_name("channel", channel)
     if create:
         for sub in ("messages", "tmp", "cursors", "done", "heartbeats", "wake"):
             (ch / sub).mkdir(parents=True, exist_ok=True)
@@ -183,7 +185,7 @@ def _read_after(ch: Path, after_seq: int) -> list[dict]:
 def _write_json(ch: Path, path: Path, data: dict) -> None:
     tmp = ch / "tmp" / f"{path.stem}-{uuid.uuid4().hex}"
     tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    tmp.replace(path)
 
 
 def _read_json(path: Path) -> dict | None:
@@ -206,7 +208,8 @@ def _flock(path: Path, blocking: bool = True):
         yield True
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    fd = (path.open_fd(os.O_RDWR | os.O_CREAT) if isinstance(path, MailboxPath)
+          else os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
@@ -520,7 +523,7 @@ def send(root: Path, channel: str, agent: str, harness: str, body: str,
             tmp = tmp_dir / f"{uuid.uuid4().hex}.json"
             tmp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
             try:
-                os.link(tmp, _message_path(msgs_dir, seq))
+                tmp.link_to(_message_path(msgs_dir, seq))
             except FileExistsError:
                 tmp.unlink(missing_ok=True)
                 time.sleep(0.002)
@@ -561,7 +564,7 @@ def _read_cursor(ch: Path, agent: str) -> int:
 def _write_cursor(ch: Path, agent: str, last_seq: int) -> None:
     tmp = ch / "tmp" / f"cursor-{uuid.uuid4().hex}"
     tmp.write_text(json.dumps({"last_seq": last_seq, "ts": _now_iso()}), encoding="utf-8")
-    os.replace(tmp, _cursor_path(ch, agent))
+    tmp.replace(_cursor_path(ch, agent))
 
 
 def _heartbeat_path(ch: Path, agent: str) -> Path:
@@ -601,7 +604,7 @@ def watch_holder(ch: Path, agent: str) -> dict | None:
     lock = _watch_path(ch, agent, "lock")
     if fcntl is None or not lock.exists():
         return None
-    fd = os.open(lock, os.O_RDONLY)
+    fd = lock.open_fd(os.O_RDONLY)
     try:
         fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         return None
@@ -617,7 +620,7 @@ def _take_reader(ch: Path, channel: str, agent: str, force: bool) -> int | None:
         return None
     lock, stop = _watch_path(ch, agent, "lock"), _watch_path(ch, agent, "stop")
     lock.parent.mkdir(exist_ok=True)
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o644)
+    fd = lock.open_fd(os.O_RDWR | os.O_CREAT)
     deadline = time.monotonic() + (TAKEOVER_WAIT if force else READER_GRACE)
     while True:
         try:
@@ -703,7 +706,7 @@ def post_done(root: Path, channel: str, agent: str, harness: str,
               "summary": summary, "ts": _now_iso()}
     tmp = ch / "tmp" / f"done-{uuid.uuid4().hex}"
     tmp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, ch / "done" / f"{agent}.json")
+    tmp.replace(ch / "done" / f"{agent}.json")
     wake_cleared = False if keep_wake else clear_wake(root, channel, agent)
     # Snapshot and publish under one lock, so the last writer always saw every
     # done record and every participant that posted before it.
@@ -715,7 +718,7 @@ def post_done(root: Path, channel: str, agent: str, harness: str,
                 "channel": channel, "complete": True, "verdict": st["verdict"],
                 "participants": st["participants"], "ts": _now_iso(),
             }, indent=2) + "\n", encoding="utf-8")
-            os.replace(tmp, ch / "VERDICT.json")
+            tmp.replace(ch / "VERDICT.json")
     return {"done": record, "complete": st["complete"], "verdict": st["verdict"],
             "wake_cleared": wake_cleared}
 
@@ -831,6 +834,7 @@ def status(root: Path, channel: str, silent_after: float = DEFAULT_SILENT) -> di
 
 
 def list_channels(root: Path) -> list[dict]:
+    root = MailboxPath(root)
     if not root.is_dir():
         return []
     out = []
@@ -886,12 +890,17 @@ def _check_hook(ch: Path, what: str, command: str, allow_secret_like: bool) -> N
                 "registered by the operator and never taken from a message body")
 
 
-def register_wake(root: Path, channel: str, agent: str, harness: str, command: str,
+def register_wake(root: Path, channel: str, agent: str, harness: str, command: str | list[str],
                   allow_secret_like: bool = False) -> dict:
     agent = _valid_name("agent", agent)
     harness = _valid_name("harness", harness)
     ch = _channel_dir(root, channel, create=True)
-    _check_hook(ch, "wake", command, allow_secret_like)
+    if isinstance(command, list):
+        if not command or not all(isinstance(a, str) for a in command) or not command[0]:
+            raise BusError("wake argv must include an executable and string arguments")
+        _check_hook(ch, "wake", shlex.join(command), allow_secret_like)
+    else:
+        _check_hook(ch, "wake", command, allow_secret_like)
     record = {"agent": agent, "harness": harness, "command": command,
               "registered_ts": _now_iso(), "last_wake_seq": 0, "last_wake_epoch": 0.0,
               "last_wake_ts": None}
@@ -977,7 +986,12 @@ def _launch_wake_locked(root: Path, channel: str, agent: str, seq: int, force: b
     if force:
         argv.append("--forced")
     env = dict(os.environ)
-    env[WAKE_COMMAND_ENV] = reg["command"]
+    env.pop(WAKE_COMMAND_ENV, None)
+    env.pop(WAKE_ARGV_ENV, None)
+    if isinstance(reg["command"], list):
+        env[WAKE_ARGV_ENV] = json.dumps(reg["command"])
+    else:
+        env[WAKE_COMMAND_ENV] = reg["command"]
     with (_wake_dir(ch) / f"{agent}.out").open("ab") as out:
         proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
                                 stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
@@ -991,7 +1005,8 @@ def _launch_wake_locked(root: Path, channel: str, agent: str, seq: int, force: b
 def _supervise(root: Path, channel: str, agent: str, harness: str, seq: int,
                source: str, forced: bool) -> int:
     ch = _channel_dir(root, channel)
-    command = os.environ.get(WAKE_COMMAND_ENV)
+    command = (json.loads(os.environ[WAKE_ARGV_ENV]) if WAKE_ARGV_ENV in os.environ
+               else os.environ.get(WAKE_COMMAND_ENV))
     if not command:
         _wake_log(ch, {"event": "exit", "agent": agent, "seq": seq, "forced": forced,
                        "source": source, "pid": os.getpid(), "exit_code": None,
@@ -1001,7 +1016,8 @@ def _supervise(root: Path, channel: str, agent: str, harness: str, seq: int,
     env = dict(os.environ, AGENT_BUS_DIR=str(root), AGENT_BUS_CHANNEL=channel,
                AGENT_BUS_AGENT=agent, AGENT_BUS_HARNESS=harness)
     env.pop(WAKE_COMMAND_ENV, None)
-    proc = subprocess.run(command, shell=True, env=env, stdin=subprocess.DEVNULL)
+    env.pop(WAKE_ARGV_ENV, None)
+    proc = subprocess.run(command, shell=isinstance(command, str), env=env, stdin=subprocess.DEVNULL)
     _wake_log(ch, {"event": "exit", "agent": agent, "seq": seq, "forced": forced,
                    "source": source, "pid": os.getpid(), "command": command,
                    "exit_code": proc.returncode})
@@ -1034,7 +1050,7 @@ def _sweep(root: Path, cooldown: float, idle: float, source: str
     results, procs = [], []
     for info in list_channels(root):
         channel = info["channel"]
-        ch = root / channel
+        ch = _channel_dir(root, channel)
         if _turn_state(ch)["capped"] or _closed(ch):
             continue
         regs = list_wakes(root, channel)
@@ -1085,23 +1101,34 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    return True
+    # An orphan that its new parent has not reaped yet still answers kill(pid, 0). On Linux,
+    # /proc reports it as a zombie (state Z): it has exited and will never read the bus again.
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return True
+    return state != "Z"
 
 
 def watch_wake(root: Path, cooldown: float = DEFAULT_COOLDOWN, idle: float = DEFAULT_IDLE,
                poll: float = WAKE_POLL_SECONDS, once: bool = False) -> int:
+    root = MailboxPath(root)
     root.mkdir(parents=True, exist_ok=True)
     if once:
         print(json.dumps(sweep_wakes(root, cooldown, idle, wait=True), indent=2))
         return 0
+    if fcntl is None:
+        raise BusError("watch-wake requires POSIX fcntl for lifetime locking")
+    with _flock(root / "watch-wake.lock", blocking=False) as owned:
+        if not owned:
+            raise BusError("watch-wake is already running on this machine")
+        return _watch_wake_owned(root, cooldown, idle, poll)
+
+
+def _watch_wake_owned(root: Path, cooldown: float, idle: float, poll: float) -> int:
     pid_path = root / "watch-wake.pid"
-    try:
-        other = int(pid_path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        other = None
-    if other and other != os.getpid() and _pid_alive(other):
-        raise BusError(f"watch-wake is already running on this machine (pid {other})")
-    pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    receipt = f"{os.getpid()}\n"
+    pid_path.write_text(receipt, encoding="utf-8")
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # so `kill` still removes the pid file
     print(f"watch-wake: root={root} cooldown={cooldown:g}s idle={idle:g}s poll={poll:g}s",
           file=sys.stderr, flush=True)
@@ -1117,7 +1144,11 @@ def watch_wake(root: Path, cooldown: float = DEFAULT_COOLDOWN, idle: float = DEF
     except KeyboardInterrupt:
         pass
     finally:
-        pid_path.unlink(missing_ok=True)
+        try:
+            if pid_path.read_text(encoding="utf-8") == receipt:
+                pid_path.unlink(missing_ok=True)
+        except FileNotFoundError:
+            pass
     return 0
 
 
