@@ -4,7 +4,7 @@
 # Then click Load all, or Load on one row. Loading sends no task or message.
 
 channel = "desk"
-cwd     = "~/projects/agent-bus"
+cwd     = ".." # relative to this config: the repository checkout
 
 [[seat]]
 name    = "orch"

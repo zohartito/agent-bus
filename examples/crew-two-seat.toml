@@ -8,7 +8,7 @@
 # Starts real interactive agents. Do not put secrets in this file.
 
 channel = "demo"
-cwd     = "~/projects/agent-bus"
+cwd     = ".." # relative to this config: the repository checkout
 
 [[seat]]
 name    = "orch"
